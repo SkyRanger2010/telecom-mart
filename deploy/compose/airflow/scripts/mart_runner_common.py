@@ -11,8 +11,10 @@ kpi_revenue_active_* — сумма kpi_revenue_daily за календарны�
 человекочитаемое имя — из ``dds_client_property_snapshot.title`` (public.client_property), иначе запасной текст по коду.
 
 АБ0: прямой COUNT(DISTINCT subscriber_id) на дату среза — все клиенты с хотя бы одним
-активным заказом (ENABLED, activated, не истёк). Без рекуррентной формулы.
-АБ30/90: рекуррент из ``kpi_inflow_daily`` / ``kpi_outflow_daily`` (см. ``_ab_kpi_flow_recurrence_insert``);
+активным заказом (ENABLED, activated, не истёк).
+АБ30/АБ90: прямой COUNT(DISTINCT subscriber_id) за окно 30/90 дней — абоненты,
+у которых был хотя бы один день с активным заказом в окне [D−N+1, D].
+Все три витрины АБ — прямые снимки, без рекуррентной формулы.
 АБ30 — с 30-го дня витрины, АБ90 — с 90-го; раньше только снимок окна 30/90 дней.
 Задачи Airflow: inflow и outflow до ab0/ab30/ab90.
 """
@@ -474,177 +476,6 @@ def _arpu_window_start_sql(anchor_date_sql: str) -> str:
         WHEN {anchor} = {month_last_day} THEN {month_start}
         ELSE {rolling_start}
     END"""
-
-
-# Лаг оттока для рекуррентной АБ: AB30 — клиент выпадает из окна через 29 дней после churn.
-AB_OUTFLOW_LAG_DAYS_BY_VITRINA: dict[str, int] = {"ab30": 29, "ab90": 89}
-# Рекуррент из притока/оттока включается с N-го календарного дня витрины (MIN report_date в flow).
-# Раньше — только снимок DISTINCT по окну 30/90 дней.
-AB_RECURRENCE_START_DAY_BY_VITRINA: dict[str, int] = {"ab30": 30, "ab90": 90}
-
-
-def _dim_keys_match_sql(left_alias: str, right_alias: str) -> str:
-    """Сопоставление разрезов витрин (NULL-safe)."""
-    return f"""
-        {left_alias}.segment_id IS NOT DISTINCT FROM {right_alias}.segment_id
-        AND {left_alias}.service_kind IS NOT DISTINCT FROM {right_alias}.service_kind
-        AND {left_alias}.tariff_id IS NOT DISTINCT FROM {right_alias}.tariff_id
-        AND {left_alias}.client_type IS NOT DISTINCT FROM {right_alias}.client_type
-        AND {left_alias}.client_type_title IS NOT DISTINCT FROM {right_alias}.client_type_title
-    """
-
-
-def _ab_snapshot_seed_cte(
-    *,
-    mart_dim_tariff_t: str,
-    snapshot_predicate_sql: str,
-) -> str:
-    """Снимок COUNT(DISTINCT subscriber) на дату — начальное значение, если нет вчерашней АБ."""
-    return f"""snap AS (
-        SELECT
-            o.segment_id,
-            o.base_type AS service_kind,
-            o.tariff_id,
-            o.client_type,
-            o.client_type_title,
-            COALESCE(MAX(CAST(dt.tariff_title AS VARCHAR)), CAST('' AS VARCHAR)) AS tariff_title,
-            COUNT(DISTINCT o.subscriber_id) AS active_subscribers
-        FROM cfg c
-        INNER JOIN sub_ord o ON true
-        LEFT JOIN {mart_dim_tariff_t} dt ON dt.tariff_id IS NOT DISTINCT FROM o.tariff_id
-        WHERE {snapshot_predicate_sql}
-        GROUP BY o.segment_id, o.base_type, o.tariff_id, o.client_type, o.client_type_title
-    )"""
-
-
-def _ab_kpi_flow_recurrence_insert(
-    *,
-    vitrina_key: str,
-    catalog: str,
-    mart_schema: str,
-    mart_dim_tariff_t: str,
-    cfg_cte: str,
-    sub_ord_cte: str,
-    report_day: date,
-    snapshot_predicate_sql: str,
-) -> str:
-    """АБ из притока/оттока: AB(D)=AB(D-1)+new_clients(D)-churned_clients(D-lag); lag 0/29/89.
-
-    До ``AB_RECURRENCE_START_DAY``-го дня витрины (от MIN даты в inflow/outflow) — только снимок окна.
-    """
-    if vitrina_key not in AB_OUTFLOW_LAG_DAYS_BY_VITRINA:
-        raise ValueError(f"unsupported ab vitrina: {vitrina_key}")
-    outflow_lag = AB_OUTFLOW_LAG_DAYS_BY_VITRINA[vitrina_key]
-    recurrence_start_day = AB_RECURRENCE_START_DAY_BY_VITRINA[vitrina_key]
-    mart_t = quote_table(catalog, mart_schema, MART_TARGET_TABLE_BY_VITRINA_KEY[vitrina_key])
-    inflow_t = quote_table(catalog, mart_schema, "kpi_inflow_daily")
-    outflow_t = quote_table(catalog, mart_schema, "kpi_outflow_daily")
-    rd = sql_date(report_day)
-    prev_rd = sql_date(report_day - timedelta(days=1))
-    out_rd = sql_date(report_day - timedelta(days=outflow_lag))
-    snap_cte = _ab_snapshot_seed_cte(
-        mart_dim_tariff_t=mart_dim_tariff_t,
-        snapshot_predicate_sql=snapshot_predicate_sql,
-    )
-    dim_match_inf = _dim_keys_match_sql("inf", "d")
-    dim_match_outf = _dim_keys_match_sql("outf", "d")
-    dim_match_prev = _dim_keys_match_sql("prev_ab", "d")
-    dim_match_snap = _dim_keys_match_sql("snap", "d")
-    return f"""
-        INSERT INTO {mart_t} (
-            report_date, segment_id, service_kind, tariff_id, tariff_title,
-            client_type, client_type_title, active_subscribers, refreshed_at
-        )
-        WITH
-            {cfg_cte},
-            {sub_ord_cte},
-            -- Приток за текущий день
-            inf AS (
-                SELECT segment_id, service_kind, tariff_id, tariff_title,
-                       client_type, client_type_title, new_clients
-                FROM {inflow_t}
-                WHERE report_date = {rd}
-            ),
-            -- Отток за день D − lag (0/29/89)
-            outf AS (
-                SELECT segment_id, service_kind, tariff_id, tariff_title,
-                       client_type, client_type_title, churned_clients
-                FROM {outflow_t}
-                WHERE report_date = {out_rd}
-            ),
-            -- AB за предыдущий день (D − 1)
-            prev_ab AS (
-                SELECT segment_id, service_kind, tariff_id, tariff_title,
-                       client_type, client_type_title, active_subscribers
-                FROM {mart_t}
-                WHERE report_date = {prev_rd}
-            ),
-            -- Самая ранняя дата в притоке/оттоке — для определения начала рекуррентного периода
-            vitrina_origin AS (
-                SELECT MIN(report_date) AS origin
-                FROM (
-                    SELECT report_date FROM {inflow_t}
-                    UNION ALL
-                    SELECT report_date FROM {outflow_t}
-                ) flow_dates
-            ),
-            -- Снимок окна 30/90 дней: используется до начала рекуррентного периода
-            {snap_cte},
-            -- Все комбинации разрезов (декартово произведение для LEFT JOIN ко всем источникам)
-            all_dims AS (
-                SELECT DISTINCT segment_id, service_kind, tariff_id, client_type, client_type_title
-                FROM (
-                    SELECT segment_id, service_kind, tariff_id, client_type, client_type_title FROM inf
-                    UNION ALL
-                    SELECT segment_id, service_kind, tariff_id, client_type, client_type_title FROM outf
-                    UNION ALL
-                    SELECT segment_id, service_kind, tariff_id, client_type, client_type_title FROM prev_ab
-                    UNION ALL
-                    SELECT segment_id, service_kind, tariff_id, client_type, client_type_title FROM snap
-                ) u
-            )
-        SELECT
-            c.process_date,
-            d.segment_id,
-            d.service_kind,
-            d.tariff_id,
-            COALESCE(
-                inf.tariff_title,
-                outf.tariff_title,
-                prev_ab.tariff_title,
-                snap.tariff_title,
-                CAST('' AS VARCHAR)
-            ),
-            d.client_type,
-            d.client_type_title,
-            -- Формула: AB(D) = max(0, AB(D−1) + inflow(D) − outflow(D−lag))
-            -- До recurrence_start_day — только снимок окна 30/90 дней
-            CAST(GREATEST(
-                CAST(0 AS BIGINT),
-                CASE
-                    WHEN (
-                        COALESCE(
-                            date_diff('day', vo.origin, CAST(c.process_date AS DATE)),
-                            CAST(0 AS INTEGER)
-                        ) + 1
-                    ) < {recurrence_start_day} THEN
-                        COALESCE(snap.active_subscribers, CAST(0 AS BIGINT))
-                    WHEN prev_ab.active_subscribers IS NOT NULL THEN
-                        prev_ab.active_subscribers
-                        + COALESCE(inf.new_clients, CAST(0 AS BIGINT))
-                        - COALESCE(outf.churned_clients, CAST(0 AS BIGINT))
-                    ELSE COALESCE(snap.active_subscribers, CAST(0 AS BIGINT))
-                END
-            ) AS BIGINT),
-            current_timestamp
-        FROM cfg c
-        CROSS JOIN vitrina_origin vo
-        CROSS JOIN all_dims d
-        LEFT JOIN inf ON {dim_match_inf}
-        LEFT JOIN outf ON {dim_match_outf}
-        LEFT JOIN prev_ab ON {dim_match_prev}
-        LEFT JOIN snap ON {dim_match_snap}
-    """
 
 
 def _subscriber_service_calendar_window_predicate(*, anchor_date_sql: str, window_days_inclusive: int) -> str:
@@ -1320,26 +1151,36 @@ def statements_for_vitrina(
         """
         return ("kpi_ab0_daily", [f"DELETE FROM {mart_t} WHERE report_date = {rd}", insert])
 
-    if vitrina_key in AB_OUTFLOW_LAG_DAYS_BY_VITRINA:
+    if vitrina_key in ("ab30", "ab90"):
+        # АБ30/АБ90 — прямой COUNT(DISTINCT subscriber_id) за окно 30/90 дней.
+        # Уникальные абоненты с хотя бы одним днём активности в окне [D−N+1, D].
+        window_days = 30 if vitrina_key == "ab30" else 90
         mart_t = quote_table(catalog, mart_schema, MART_TARGET_TABLE_BY_VITRINA_KEY[vitrina_key])
-        if vitrina_key == "ab30":
-            snap_pred = _subscriber_service_calendar_window_predicate(
-                anchor_date_sql="c.process_date", window_days_inclusive=30
-            )
-        else:
-            snap_pred = _subscriber_service_calendar_window_predicate(
-                anchor_date_sql="c.process_date", window_days_inclusive=90
-            )
-        insert = _ab_kpi_flow_recurrence_insert(
-            vitrina_key=vitrina_key,
-            catalog=catalog,
-            mart_schema=mart_schema,
-            mart_dim_tariff_t=mart_dim_tariff_t,
-            cfg_cte=cfg_cte,
-            sub_ord_cte=sub_ord_cte,
-            report_day=report_day,
-            snapshot_predicate_sql=snap_pred,
+        window_pred = _subscriber_service_calendar_window_predicate(
+            anchor_date_sql="c.process_date", window_days_inclusive=window_days
         )
+        insert = f"""
+        INSERT INTO {mart_t} (
+            report_date, segment_id, service_kind, tariff_id, tariff_title,
+            client_type, client_type_title, active_subscribers, refreshed_at
+        )
+        WITH {cfg_cte},
+             {sub_ord_cte}
+        SELECT c.process_date,
+               o.segment_id,
+               o.base_type AS service_kind,
+               o.tariff_id,
+               COALESCE(MAX(CAST(dt.tariff_title AS VARCHAR)), CAST('' AS VARCHAR)),
+               o.client_type,
+               o.client_type_title,
+               COUNT(DISTINCT o.subscriber_id),
+               current_timestamp
+        FROM cfg c
+        INNER JOIN sub_ord o ON true
+        LEFT JOIN {mart_dim_tariff_t} dt ON dt.tariff_id IS NOT DISTINCT FROM o.tariff_id
+        WHERE {window_pred}
+        GROUP BY c.process_date, o.segment_id, o.base_type, o.tariff_id, o.client_type, o.client_type_title
+        """
         return (MART_TARGET_TABLE_BY_VITRINA_KEY[vitrina_key], [f"DELETE FROM {mart_t} WHERE report_date = {rd}", insert])
 
     if vitrina_key == "revenue":
