@@ -14,8 +14,6 @@ MART_JOB_SCRIPTS: tuple[str, ...] = (
     "gen_kpi_inflow_daily.py",
     "gen_kpi_outflow_daily.py",
     "gen_kpi_ab0_daily.py",
-    "gen_kpi_ab30_daily.py",
-    "gen_kpi_ab90_daily.py",
     "gen_kpi_arpu_daily.py",
     "gen_kpi_revenue_daily.py",
     "gen_kpi_receipts_daily.py",
@@ -28,8 +26,6 @@ MART_JOB_SCRIPTS: tuple[str, ...] = (
 # Зависимости DAG: АБ-витрины читают kpi_inflow_daily / kpi_outflow_daily за тот же день (и лаг оттока).
 MART_AB_JOB_SCRIPTS: tuple[str, ...] = (
     "gen_kpi_ab0_daily.py",
-    "gen_kpi_ab30_daily.py",
-    "gen_kpi_ab90_daily.py",
 )
 MART_FLOW_JOB_SCRIPTS: tuple[str, ...] = (
     "gen_kpi_inflow_daily.py",
