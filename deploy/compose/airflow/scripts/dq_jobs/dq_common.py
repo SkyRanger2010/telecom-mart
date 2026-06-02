@@ -24,17 +24,34 @@ from load_raw_day import (
 
 
 def dq_summary_phase_raw() -> str:
-    """Значение колонки phase для сводки по raw_load_manifest."""
+    """Значение колонки ``phase`` для сводки по ``raw_load_manifest``.
+
+    Returns:
+        Строка ``"raw_manifest"``.
+    """
     return "raw_manifest"
 
 
 def dq_summary_phase_dds() -> str:
-    """Значение колонки phase для сводки по dds_table_load_log."""
+    """Значение колонки ``phase`` для сводки по ``dds_table_load_log``.
+
+    Returns:
+        Строка ``"dds_load_log"``.
+    """
     return "dds_load_log"
 
 
 def ensure_dq_daily_summary_table(dst_cur, catalog: str, validate_schema: str) -> str:
-    """Создаёт схему и таблицу при необходимости; возвращает полное имя таблицы."""
+    """Создаёт схему и таблицу ``dq_daily_summary`` в Iceberg при необходимости.
+
+    Args:
+        dst_cur: Курсор Trino.
+        catalog: Каталог Trino.
+        validate_schema: Схема для DQ (обычно ``validate``).
+
+    Returns:
+        Полное имя таблицы ``catalog.validate_schema.dq_daily_summary``.
+    """
     summary_ref = quote_table(catalog, validate_schema, "dq_daily_summary")
     dst_cur.execute(f"CREATE SCHEMA IF NOT EXISTS {quote_schema(catalog, validate_schema)}")
     dst_cur.execute(
@@ -60,7 +77,19 @@ def write_dq_daily_summary(
     aggregates: dict[str, Any],
     summary_line: str,
 ) -> None:
-    """DELETE+INSERT одной строки сводки (идемпотентный перезапуск задачи Airflow)."""
+    """DELETE + INSERT одной строки сводки (идемпотентный перезапуск задачи Airflow).
+
+    Удаляет существующую строку с тем же ``(process_date, phase)``,
+    затем вставляет новую с ``evaluated_at = NOW()``.
+
+    Args:
+        dst_cur: Курсор Trino.
+        summary_ref: Полное имя таблицы ``dq_daily_summary``.
+        process_date: Календарный день.
+        phase: Фаза DQ (``raw_manifest`` или ``dds_load_log``).
+        aggregates: Словарь с агрегатами (записывается как JSON).
+        summary_line: Текстовая сводка одной строкой.
+    """
     evaluated = datetime.now(timezone.utc)
     dst_cur.execute(
         f"""
@@ -86,7 +115,11 @@ def write_dq_daily_summary(
 
 
 def commit_trino_if_supported(conn) -> None:
-    """У части Trino-клиентов есть commit(); у части — нет. Не падаем ни в каком случае."""
+    """Безопасный commit: у части Trino-клиентов есть ``commit()``, у части — нет.
+
+    Args:
+        conn: Соединение Trino (через ``connect_trino``).
+    """
     fn = getattr(conn, "commit", None)
     if callable(fn):
         fn()

@@ -50,6 +50,18 @@ START = pendulum.datetime(2024, 1, 1, tz=RAW_TZ)
 
 
 def _daterange_inclusive(start: date, end: date) -> list[date]:
+    """Список календарных дней от ``start`` до ``end`` включительно.
+
+    Args:
+        start: Первый день (включительно).
+        end: Последний день (включительно).
+
+    Returns:
+        Список дат в порядке возрастания.
+
+    Raises:
+        ValueError: Если ``start > end``.
+    """
     if start > end:
         raise ValueError(f"start_date ({start}) позже end_date ({end})")
     out: list[date] = []
@@ -61,6 +73,14 @@ def _daterange_inclusive(start: date, end: date) -> list[date]:
 
 
 def _truthy(val: Any) -> bool:
+    """Интерпретация значения как булева: None → False, "1"/"true"/"yes"/"on" → True.
+
+    Args:
+        val: Значение из conf/params.
+
+    Returns:
+        Булева интерпретация.
+    """
     if val is None:
         return False
     if isinstance(val, bool):
@@ -70,6 +90,14 @@ def _truthy(val: Any) -> bool:
 
 
 def _resolve_range_and_flags(context: dict) -> tuple[date, date, bool]:
+    """Извлекает диапазон дат и флаг ``ensure_all_ddl`` из контекста задачи.
+
+    Args:
+        context: Контекст Airflow (dag_run, params).
+
+    Returns:
+        Кортеж ``(start_date, end_date, ensure_all_ddl)``.
+    """
     dag_run = context.get("dag_run")
     conf = (dag_run.conf if dag_run else None) or {}
     if not isinstance(conf, dict):
@@ -77,6 +105,16 @@ def _resolve_range_and_flags(context: dict) -> tuple[date, date, bool]:
     params_obj = context.get("params") or {}
 
     def _pick(*keys: str) -> str | None:
+        """Возвращает первое непустое значение из conf или params по цепочке ключей.
+
+        Приоритет: Configuration JSON → Params DAG.
+
+        Args:
+            *keys: Имена ключей для поиска (например ``"start_date"``, ``"from_date"``).
+
+        Returns:
+            Строковое значение или None.
+        """
         for k in keys:
             v = conf.get(k)
             if v is not None and str(v).strip() != "":
@@ -107,6 +145,15 @@ def _resolve_range_and_flags(context: dict) -> tuple[date, date, bool]:
 
 
 def run_mart_layer_backfill(**context: Any) -> None:
+    """Последовательный пересчёт всех MART-витрин за каждый день диапазона.
+
+    Для каждого дня запускает скрипты из ``MART_JOB_SCRIPTS`` в заданном порядке.
+    При ``ensure_all_ddl=True`` первому скрипту первого дня добавляется ``--ensure-all-ddl``.
+    Не вызывает RAW/DDS/DQ — предполагается, что DDS уже заполнен.
+
+    Args:
+        context: Контекст задачи Airflow.
+    """
     start_d, end_d, ensure_all_ddl = _resolve_range_and_flags(context)
     days = _daterange_inclusive(start_d, end_d)
 
@@ -129,6 +176,7 @@ def run_mart_layer_backfill(**context: Any) -> None:
                 "--report-date",
                 d.isoformat(),
             ]
+            # --ensure-all-ddl только для первого скрипта первого дня (создание таблиц при холодном старте).
             if ensure_all_ddl and d == start_d and idx == 0:
                 cmd.append("--ensure-all-ddl")
 

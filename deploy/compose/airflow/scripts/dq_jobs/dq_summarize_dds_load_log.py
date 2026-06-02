@@ -42,6 +42,17 @@ def _fetch_log_rows(
     dds_schema: str,
     process_date: date,
 ) -> list[dict[str, Any]]:
+    """Читает строки ``dds_table_load_log`` за указанный день.
+
+    Args:
+        cur: Курсор Trino.
+        catalog: Каталог.
+        dds_schema: Схема DDS.
+        process_date: Календарный день (snapshot_day).
+
+    Returns:
+        Список словарей с полями журнала.
+    """
     tref = quote_table(catalog, dds_schema, "dds_table_load_log")
     cur.execute(
         f"""
@@ -71,6 +82,16 @@ def _persist(
     aggregates: dict[str, Any],
     summary_line: str,
 ) -> None:
+    """Сохраняет сводку DQ DDS в ``validate.dq_daily_summary``.
+
+    Args:
+        trino_target: Конфигурация подключения Trino.
+        catalog: Каталог.
+        validate_schema: Схема DQ.
+        process_date: Календарный день.
+        aggregates: Словарь агрегатов.
+        summary_line: Текстовая сводка.
+    """
     with connect_trino(trino_target) as conn:
         with conn.cursor() as cur:
             summary_ref = ensure_dq_daily_summary_table(cur, catalog, validate_schema)

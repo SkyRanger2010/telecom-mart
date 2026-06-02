@@ -77,7 +77,17 @@ _RAW_TABLE_NAMES_FALLBACK: tuple[str, ...] = (
 
 
 def raw_table_names_for_dag(config_path: str = RAW_CONFIG) -> tuple[str, ...]:
-    """Имена `tables[].name` из JSON подряд как в конфиге; fallback если файл недоступен при парсе DAG."""
+    """Читает имена ``tables[].name`` из ``raw_load_config.json``.
+
+    Используется для динамической генерации задач ``raw__*`` в DAG.
+    При недоступном JSON — fallback на ``_RAW_TABLE_NAMES_FALLBACK``.
+
+    Args:
+        config_path: Путь к raw_load_config.json.
+
+    Returns:
+        Кортеж имён таблиц в порядке из конфига.
+    """
     path = Path(config_path)
     if path.is_file():
         try:
@@ -99,6 +109,14 @@ _KPI_DATA_DAY = "{{ ti.xcom_pull(task_ids='resolve_kpi_daily_data_day', key='dat
 
 
 def _resolve_kpi_daily_data_day(**context) -> None:
+    """Resolve-задача: определяет день данных через ``resolve_data_day`` и пушит XCom ``data_day``.
+
+    Приоритет: conf.process_date → Params.process_date → водяной знак в Iceberg.
+    Результат потребляется всеми downstream-задачами через ``{{ ti.xcom_pull(…) }}``.
+
+    Args:
+        context: Контекст задачи Airflow.
+    """
     from telecom_kpi_daily_watermark import resolve_data_day
 
     dag_run = context["dag_run"]
@@ -125,6 +143,17 @@ def _resolve_kpi_daily_data_day(**context) -> None:
 
 
 def _advance_kpi_daily_watermark(**context) -> None:
+    """Завершающая задача DAG: продвигает водяной знак в ``raw_load_service_state``.
+
+    Читает ``data_day`` из XCom, вызывает ``advance_daily_watermark``.
+    Выполняется только при ``TriggerRule.ALL_SUCCESS`` всего DAG.
+
+    Args:
+        context: Контекст задачи Airflow.
+
+    Raises:
+        RuntimeError: Если XCom ``data_day`` отсутствует.
+    """
     from datetime import date as date_cls
 
     from telecom_kpi_daily_watermark import advance_daily_watermark
@@ -294,6 +323,18 @@ with DAG(
         )
 
     def _mart_bash_operator(script: str) -> BashOperator:
+        """Фабрика BashOperator для одного MART-скрипта.
+
+        Формирует команду ``python3 /opt/airflow/scripts/mart_jobs/{script}
+        --config {RAW_CONFIG} --report-date {_KPI_DATA_DAY}``.
+        Task ID строится из имени файла без расширения ``.py``.
+
+        Args:
+            script: Имя файла скрипта (например ``"gen_dim_tariff.py"``).
+
+        Returns:
+            BashOperator, готовый к добавлению в граф DAG.
+        """
         return BashOperator(
             task_id=f"mart__{script[:-3]}",
             bash_command=(
@@ -307,6 +348,7 @@ with DAG(
     mart_dim_tariff = _mart_bash_operator(_DIM_TARIFF_SCRIPT)
     mart_flow_tasks = [_mart_bash_operator(name) for name in MART_FLOW_JOB_SCRIPTS]
     mart_ab_tasks = [_mart_bash_operator(name) for name in MART_AB_JOB_SCRIPTS]
+    # Исключаем из «прочих» скрипты с явными зависимостями (dim_tariff, inflow/outflow, АБ).
     _mart_skip = {_DIM_TARIFF_SCRIPT, *MART_FLOW_JOB_SCRIPTS, *MART_AB_JOB_SCRIPTS}
     mart_other_tasks = [_mart_bash_operator(name) for name in MART_JOB_SCRIPTS if name not in _mart_skip]
 
@@ -317,6 +359,7 @@ with DAG(
     )
 
     mart_all_kpi = mart_flow_tasks + mart_ab_tasks + mart_other_tasks
+    # dim_tariff → все кроме себя; inflow/outflow → каждый → все АБ.
     mart_dim_tariff >> (mart_flow_tasks + mart_other_tasks)
     for _flow in mart_flow_tasks:
         _flow >> mart_ab_tasks

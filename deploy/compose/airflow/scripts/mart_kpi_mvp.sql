@@ -20,7 +20,9 @@
 
 CREATE SCHEMA IF NOT EXISTS iceberg.mart;
 
--- Продуктовые заказы, присоединённые к договору: HALK orders.owner_id = agreements.id; абонент — agreements.client_id.
+-- Продуктовые заказы, присоединённые к договору: HALK orders.owner_id = agreements.id;
+-- абонент — agreements.client_id. Исключаем expenditure (расходные) и draft (черновики).
+-- Это базовое представление для всех витрин AB, revenue, inflow/outflow.
 CREATE OR REPLACE VIEW iceberg.mart.v_subscriber_orders AS
 SELECT
     o.id AS order_id,
@@ -43,6 +45,8 @@ WHERE o.expenditure = false
 
 -- -----------------------------------------------------------------------------
 -- AB0: уникальные клиенты (subscriber_id) с активным продуктовым заказом на текущую дату.
+-- Условия: status='ENABLED', activated IS NOT NULL, expire_time не истекло.
+-- GROUPING SETS даёт сразу все уровни агрегации (все комбинации разрезов + total).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.mart.v_ab0_by_dims AS
 SELECT
@@ -67,6 +71,7 @@ GROUP BY GROUPING SETS (
 
 -- -----------------------------------------------------------------------------
 -- Выручка по заказу из ledgers (MVP): положительные credits за календарный день period.
+-- Без нормализации на длительность интервала проводки — сырая сумма за день.
 -- ARPU знаменатель см. kpi_arpu_daily (активные клиенты AB0 на дату × MTD выручка по дням).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.mart.v_revenue_daily_by_order AS
@@ -101,8 +106,13 @@ GROUP BY GROUPING SETS (
 );
 
 -- -----------------------------------------------------------------------------
--- Иллюстрация окна AB30/AB90 (якорь — CURRENT_DATE для ad-hoc; в проде временной ряд — kpi_ab30_daily и kpi_ab90_daily из mart_vitrina_runner по report_date).
--- Учитываются заказы статусом ENABLED или EXPIRED; DISABLED исключены. Ограничение: без истории статусов в DDS пересуждение календаря по activated/expire.
+-- Иллюстрация окна AB30/AB90 (якорь — CURRENT_DATE для ad-hoc;
+-- в проде временной ряд — kpi_ab30_daily и kpi_ab90_daily из mart_vitrina_runner по report_date).
+-- Учитываются заказы статусом ENABLED или EXPIRED; DISABLED исключены.
+-- Ограничение: без истории статусов в DDS пересуждение календаря по activated/expire.
+--
+-- AB30: все заказы, чей activated <= CURRENT_DATE и expire_time >= CURRENT_DATE - 29 дней.
+-- AB90: то же, окно 90 дней.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.mart.v_ab_activity_overlay_mvp AS
 SELECT
@@ -152,6 +162,8 @@ GROUP BY GROUPING SETS (
 -- -----------------------------------------------------------------------------
 -- ARPU (MTD месяца на report_date): выручка ledgers, нормированная на календарный день заказа;
 -- активные клиенты AB0 на дату; без разреза бизнес-центра.
+-- Источник: физическая таблица kpi_arpu_daily (генерируется mart_vitrina_runner).
+-- Поля: arpu_daily = дневной ARPU, arpu_monthly = arpu_daily × дней в месяце.
 CREATE OR REPLACE VIEW iceberg.mart.v_arpu_daily_by_dims AS
 SELECT
     report_date AS revenue_day,
@@ -167,8 +179,10 @@ FROM iceberg.mart.kpi_arpu_daily;
 -- -----------------------------------------------------------------------------
 -- Приток (календарный день активации заказа):
 --   new_orders — все активации продуктовых заказов в этот день;
---   new_clients — agreements.client_id, у которых это глобальный первый день активации;
---   new_agreements — договор (orders.owner_id = agreements.id), у которого это первый день активации любого заказа.
+--   new_clients — agreements.client_id, у которых это глобальный первый день активации
+--     (MIN(activated) по subscriber_id);
+--   new_agreements — договор (orders.owner_id = agreements.id), у которого это первый
+--     день активации любого заказа (MIN(activated) по agreement_id).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.mart.v_inflow_daily_by_dims AS
 SELECT
@@ -220,8 +234,10 @@ GROUP BY GROUPING SETS (
 -- -----------------------------------------------------------------------------
 -- Отток (календарный день CAST(expire_time AS date), только заказы с expire_time):
 --   completed_orders — заказы с этим днём окончания;
---   completed_agreements — договор, у которого MAX(expire) по всем его заказам = этот день;
---   churned_clients — клиент, у которого MAX(expire) по всем его заказам = этот день.
+--   completed_agreements — договор, у которого MAX(expire) по всем его заказам = этот день
+--     (все подписки договора завершены);
+--   churned_clients — клиент, у которого MAX(expire) по всем его заказам = этот день
+--     (клиент полностью ушёл, нет ни одной активной подписки).
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW iceberg.mart.v_outflow_daily_by_dims AS
 SELECT

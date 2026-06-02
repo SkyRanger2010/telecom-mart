@@ -40,6 +40,14 @@ _FENCED_SQL = re.compile(r"```(?:sql)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 
 def extract_sql(llm_answer: str) -> str | None:
+    """Извлечь SQL из ответа LLM: fenced code block (```sql...```) или голый WITH/SELECT.
+
+    Args:
+        llm_answer: Сырой текст ответа модели.
+
+    Returns:
+        SQL-строку (без завершающей ;) или None, если не найдено.
+    """
     text = llm_answer.strip()
     fb = _FENCED_SQL.search(text)
     if fb:
@@ -54,6 +62,11 @@ def extract_sql(llm_answer: str) -> str | None:
 
 
 def _strip_comments_for_scan(sql: str) -> str:
+    """Удалить комментарии (/* block */, -- line) и строковые литералы для проверки ключевых слов.
+
+    Строковые литералы заменяются на '' чтобы не ложноположительно срабатывали
+    на запрещённых словах внутри строк.
+    """
     s = _BLOCK_COMMENT.sub("", sql)
     lines_out: list[str] = []
     for line in s.splitlines():
@@ -66,6 +79,7 @@ def _strip_comments_for_scan(sql: str) -> str:
 
 
 def _mentions_allowed_table(norm_sql: str) -> bool:
+    """Проверить, что SQL ссылается хотя бы на одну таблицу из белого списка ALLOWED_KPI_TABLES."""
     low = norm_sql.lower().replace("`", "").replace('"', "")
     for tn in ALLOWED_KPI_TABLES:
         if tn.lower() in low:
@@ -74,6 +88,20 @@ def _mentions_allowed_table(norm_sql: str) -> bool:
 
 
 def validate_readonly_clickhouse_sql(sql: str) -> tuple[bool, str | None]:
+    """Проверить SQL на соответствие правилам NL2SQL для ClickHouse.
+
+    Правила:
+    - Только WITH/SELECT (запрещены DDL, DML, SYSTEM, SHOW, DESCRIBE, …).
+    - Один оператор (без ;).
+    - Запрещены FORMAT, INTO OUTFILE.
+    - Должна упоминаться хотя бы одна таблица из ALLOWED_KPI_TABLES.
+
+    Args:
+        sql: SQL-запрос.
+
+    Returns:
+        (True, None) если OK, иначе (False, сообщение_об_ошибке).
+    """
     raw = sql.strip()
     if not raw:
         return False, "пустой SQL"
@@ -109,6 +137,15 @@ def validate_readonly_clickhouse_sql(sql: str) -> tuple[bool, str | None]:
 
 
 def enforce_limit_sql(sql: str, max_rows: int) -> tuple[str, str | None]:
+    """Добавить или ограничить LIMIT в SQL-запросе.
+
+    Args:
+        sql: SQL-запрос.
+        max_rows: Максимально допустимый лимит строк.
+
+    Returns:
+        (SQL с LIMIT, warning или None).
+    """
     uh = sql.upper()
     warning: str | None = None
     m = re.search(r"\bLIMIT\s+(\d+)", uh)
@@ -131,6 +168,7 @@ def _qi(name: str) -> str:
 
 
 def qualified_table_name(database: str, table: str) -> str:
+    """Полное имя таблицы с экранированием: `database`.`table`."""
     return f"{_qi(database.strip())}.{_qi(table.strip())}"
 
 
@@ -194,6 +232,14 @@ class GuardAssistantOut(BaseModel):
 
 
 def guard_assistant_response(body: GuardAssistantIn) -> GuardAssistantOut:
+    """Полный пайплайн проверки ответа LLM: извлечение SQL → валидация → LIMIT → материализация.
+
+    Args:
+        body: Текст ответа модели, max_rows, опционально materialize_table и database.
+
+    Returns:
+        GuardAssistantOut с ok, sql, errors, warnings, materialize_sql.
+    """
     warns: list[str] = []
 
     extracted = extract_sql(body.assistant_text)
@@ -244,6 +290,7 @@ def guard_assistant_response(body: GuardAssistantIn) -> GuardAssistantOut:
 
 
 def validate_clickhouse_nl2sql_rules(sql: str) -> tuple[bool, list[str]]:
+    """Обёртка для проверки SQL: возвращает (ok, список_ошибок)."""
     ok, msg = validate_readonly_clickhouse_sql(sql)
     if ok:
         return True, []

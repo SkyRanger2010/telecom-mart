@@ -56,6 +56,18 @@ START = pendulum.datetime(2024, 1, 1, tz=RAW_TZ)
 
 
 def _daterange_inclusive(start: date, end: date) -> list[date]:
+    """Список календарных дней от ``start`` до ``end`` включительно.
+
+    Args:
+        start: Первый день (включительно).
+        end: Последний день (включительно).
+
+    Returns:
+        Список дат в порядке возрастания.
+
+    Raises:
+        ValueError: Если ``start > end``.
+    """
     if start > end:
         raise ValueError(f"start_date ({start}) позже end_date ({end})")
     out: list[date] = []
@@ -67,6 +79,14 @@ def _daterange_inclusive(start: date, end: date) -> list[date]:
 
 
 def _truthy(val: Any) -> bool:
+    """Интерпретация значения как булева: None → False, "1"/"true"/"yes"/"on" → True.
+
+    Args:
+        val: Значение из conf/params.
+
+    Returns:
+        Булева интерпретация.
+    """
     if val is None:
         return False
     if isinstance(val, bool):
@@ -76,6 +96,15 @@ def _truthy(val: Any) -> bool:
 
 
 def _run_subprocess(cmd: list[str], *, label: str) -> None:
+    """Запуск подпроцесса с проверкой кода возврата.
+
+    Args:
+        cmd: Команда и аргументы.
+        label: Метка для логирования и сообщения об ошибке.
+
+    Raises:
+        RuntimeError: Если код возврата ≠ 0.
+    """
     LOGGER.info("[INFO] %s: %s", label, " ".join(cmd))
     proc = subprocess.run(cmd, check=False, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -84,6 +113,16 @@ def _run_subprocess(cmd: list[str], *, label: str) -> None:
 
 
 def _resolve_context(context: dict) -> tuple[str, date, date, bool, bool, bool]:
+    """Извлекает параметры витрины и диапазон дат из контекста задачи.
+
+    Приоритет: Configuration JSON → Params → переменные окружения.
+
+    Args:
+        context: Контекст Airflow.
+
+    Returns:
+        Кортеж ``(vitrina, start_date, end_date, ensure_all_ddl, sync_clickhouse, clickhouse_full_table)``.
+    """
     dag_run = context.get("dag_run")
     conf = (dag_run.conf if dag_run else None) or {}
     if not isinstance(conf, dict):
@@ -91,6 +130,16 @@ def _resolve_context(context: dict) -> tuple[str, date, date, bool, bool, bool]:
     params_obj = context.get("params") or {}
 
     def _pick(*keys: str) -> str | None:
+        """Возвращает первое непустое значение из conf или params по цепочке ключей.
+
+        Приоритет: Configuration JSON → Params DAG.
+
+        Args:
+            *keys: Имена ключей для поиска (например ``"start_date"``, ``"from_date"``).
+
+        Returns:
+            Строковое значение или None.
+        """
         for k in keys:
             v = conf.get(k)
             if v is not None and str(v).strip() != "":
@@ -135,6 +184,18 @@ def _resolve_context(context: dict) -> tuple[str, date, date, bool, bool, bool]:
 
 
 def run_mart_vitrina_backfill(**context: Any) -> None:
+    """Пересчёт одной MART-витрины за диапазон дат с опциональной синхронизацией ClickHouse.
+
+    Для каждого дня:
+    1. Запускает ``mart_vitrina_runner.py`` с ``--vitrina`` и ``--report-date``.
+    2. При ``sync_clickhouse=True`` и ``clickhouse_full_table=False`` —
+       инкрементальная репликация в CH через ``mart_serving_clickhouse.py --report-date``.
+    После всех дней — при ``clickhouse_full_table=True`` или ``dim_tariff`` —
+    одна полная выгрузка ``--full-table``.
+
+    Args:
+        context: Контекст задачи Airflow.
+    """
     vitrina_raw, start_d, end_d, ensure_all_ddl, sync_clickhouse, clickhouse_full_table = _resolve_context(
         context
     )
@@ -149,6 +210,7 @@ def run_mart_vitrina_backfill(**context: Any) -> None:
 
     vitrina_key = normalize_vitrina_key(vitrina_raw)
     serving_table = MART_TARGET_TABLE_BY_VITRINA_KEY[vitrina_key]
+    # Режимы синхронизации ClickHouse: per-day (инкремент) или один full-table (dim_tariff всегда full).
     ch_per_day = sync_clickhouse and not clickhouse_full_table and vitrina_key != "dim_tariff"
     ch_full_once = sync_clickhouse and (clickhouse_full_table or vitrina_key == "dim_tariff")
 

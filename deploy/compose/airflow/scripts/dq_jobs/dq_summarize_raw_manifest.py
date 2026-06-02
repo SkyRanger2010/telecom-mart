@@ -44,6 +44,17 @@ def _fetch_manifest_rows(
     raw_schema: str,
     process_date: date,
 ) -> list[dict[str, Any]]:
+    """Читает строки ``raw_load_manifest`` за указанный день.
+
+    Args:
+        cur: Курсор Trino.
+        catalog: Каталог.
+        raw_schema: Схема RAW.
+        process_date: Календарный день загрузки.
+
+    Returns:
+        Список словарей с полями manifest.
+    """
     mref = quote_table(catalog, raw_schema, "raw_load_manifest")
     cur.execute(
         f"""
@@ -78,6 +89,16 @@ def _persist(
     aggregates: dict[str, Any],
     summary_line: str,
 ) -> None:
+    """Сохраняет сводку DQ RAW в ``validate.dq_daily_summary``.
+
+    Args:
+        trino_target: Конфигурация подключения Trino.
+        catalog: Каталог.
+        validate_schema: Схема DQ.
+        process_date: Календарный день.
+        aggregates: Словарь агрегатов.
+        summary_line: Текстовая сводка.
+    """
     with connect_trino(trino_target) as conn:
         with conn.cursor() as cur:
             summary_ref = ensure_dq_daily_summary_table(cur, catalog, validate_schema)

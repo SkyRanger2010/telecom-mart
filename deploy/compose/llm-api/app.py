@@ -95,6 +95,11 @@ STUB_NL2SQL_MARKDOWN = (
 
 
 def upstream_chat_endpoint() -> str:
+    """URL upstream chat completions API (OpenAI-совместимый, по умолчанию DeepSeek).
+
+    Returns:
+        Полный URL или пустую строку, если upstream не настроен.
+    """
     if not UPSTREAM_CHAT_URL:
         return ""
     base = UPSTREAM_CHAT_URL.strip().rstrip("/")
@@ -102,6 +107,7 @@ def upstream_chat_endpoint() -> str:
 
 
 def _upstream_headers() -> dict[str, str]:
+    """Заголовки для upstream-запросов: Content-Type + Bearer-авторизация (если задан токен)."""
     hdr: dict[str, str] = {"Content-Type": "application/json"}
     if not UPSTREAM_AUTH:
         return hdr
@@ -114,6 +120,17 @@ def _upstream_headers() -> dict[str, str]:
 
 
 def _post_upstream(payload: dict[str, Any]) -> dict[str, Any]:
+    """POST-запрос к upstream chat completions API с обработкой ошибок.
+
+    Args:
+        payload: JSON-тело запроса (model, messages).
+
+    Returns:
+        Ответ upstream в виде словаря.
+
+    Raises:
+        HTTPException(502) при ошибках соединения или HTTP-статусе ≠ 2xx.
+    """
     try:
         resp = httpx.post(
             upstream_chat_endpoint(),
@@ -138,6 +155,7 @@ def _post_upstream(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _nl2sql_max_rows(request: dict[str, Any] | None) -> int:
+    """Извлечь max_rows из поля constraints JSON-контекста NL2SQL."""
     if not request:
         return 500
     try:
@@ -148,6 +166,7 @@ def _nl2sql_max_rows(request: dict[str, Any] | None) -> int:
 
 
 def _nl2sql_table_qualifier(request: dict[str, Any] | None) -> str:
+    """Извлечь table_qualifier (имя БД) из поля database JSON-контекста NL2SQL."""
     if not request:
         return "serving"
     db = request.get("database") or {}
@@ -157,6 +176,11 @@ def _nl2sql_table_qualifier(request: dict[str, Any] | None) -> str:
 
 
 def _build_nl2sql_messages(body: "Nl2SqlCompletionsIn") -> list[dict[str, str]]:
+    """Сформировать список сообщений для LLM: system + user.
+
+    Если есть поле request (JSON) — использует шаблон NL2SQL_SYSTEM_JSON_TEMPLATE.
+    Иначе — legacy-режим с NL2SQL_SYSTEM_LEGACY и schema_block.
+    """
     if body.request:
         req = body.request
         max_rows = _nl2sql_max_rows(req)
@@ -191,11 +215,13 @@ app = FastAPI(
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """Health-check: статус сервиса и наличие upstream."""
     return {"status": "ok", "service": SERVICE, "upstream_configured": bool(UPSTREAM_CHAT_URL)}
 
 
 @app.get("/api/v1/info")
 def info() -> dict[str, Any]:
+    """Метаданные сервиса: версия, режимы NL2SQL, время."""
     return {
         "service": SERVICE,
         "upstream_chat_completions": bool(UPSTREAM_CHAT_URL),
@@ -218,6 +244,7 @@ class ChatCompletionIn(BaseModel):
 
 @app.get("/api/v1/models")
 def models_list() -> dict[str, Any]:
+    """Список доступных моделей (OpenAI-compatible /models endpoint)."""
     return {
         "object": "list",
         "data": [{"id": "stub-model", "object": "model", "upstream": bool(UPSTREAM_CHAT_URL)}],
@@ -226,6 +253,10 @@ def models_list() -> dict[str, Any]:
 
 @app.post("/api/v1/chat/completions")
 def chat_completions(body: ChatCompletionIn) -> dict[str, Any]:
+    """OpenAI-совместимый chat completions: прокси к upstream или stub-ответ.
+
+    Если UPSTREAM_CHAT_URL настроен — проксирует запрос, иначе возвращает заглушку.
+    """
     last = body.messages[-1].content if body.messages else ""
 
     if UPSTREAM_CHAT_URL:
@@ -269,6 +300,11 @@ class Nl2SqlCompletionsIn(BaseModel):
 
 @app.post("/api/v1/nl2sql/completions")
 def nl2sql_completions(body: Nl2SqlCompletionsIn) -> dict[str, Any]:
+    """NL2SQL: естественный язык → SQL (ClickHouse).
+
+    Принимает JSON-контекст (поле request) или legacy question + schema_block.
+    Проксирует в upstream LLM или возвращает stub-ответ.
+    """
     if not body.request and not (body.question or "").strip():
         return {
             "error": "нужно поле request (JSON) или question (legacy)",

@@ -1,3 +1,4 @@
+"""Клиент для прямых запросов к ClickHouse (параметрические SELECT и DDL/DML)."""
 from __future__ import annotations
 
 from typing import Any
