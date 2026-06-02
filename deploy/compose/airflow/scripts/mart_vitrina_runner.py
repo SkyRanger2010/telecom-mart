@@ -447,34 +447,32 @@ def run_generate(
             )
             for ddl in ddl_list:
                 cur.execute(ddl.strip())
-            _maybe_add_tariff_title_column(
-                cur,
-                catalog=catalog,
-                mart_schema=mart_schema,
-                logical_name=logical_name,
-                dry_run=bool(args.dry_run),
-            )
-            _maybe_add_client_type_column(
-                cur,
-                catalog=catalog,
-                mart_schema=mart_schema,
-                logical_name=logical_name,
-                dry_run=bool(args.dry_run),
-            )
-            _maybe_add_client_type_title_column(
-                cur,
-                catalog=catalog,
-                mart_schema=mart_schema,
-                logical_name=logical_name,
-                dry_run=bool(args.dry_run),
-            )
-            _maybe_add_arpu_monthly_column(
-                cur,
-                catalog=catalog,
-                mart_schema=mart_schema,
-                logical_name=logical_name,
-                dry_run=bool(args.dry_run),
-            )
+            # AB0 считает сразу три витрины — нужны DDL и миграции для всех.
+            _ab_all_logical_names: list[str] = [logical_name]
+            if vitrina_key == "ab0":
+                _ab_all_logical_names.extend(["kpi_ab30_daily", "kpi_ab90_daily"])
+                for _ab_tbl in ["kpi_ab30_daily", "kpi_ab90_daily"]:
+                    for _ddl in ensure_vitrina_target_ddl_sql(catalog, mart_schema,
+                            "ab30" if _ab_tbl == "kpi_ab30_daily" else "ab90"):
+                        cur.execute(_ddl.strip())
+            # Миграции колонок для всех затронутых таблиц
+            for _name in _ab_all_logical_names:
+                _maybe_add_tariff_title_column(
+                    cur, catalog=catalog, mart_schema=mart_schema,
+                    logical_name=_name, dry_run=bool(args.dry_run),
+                )
+                _maybe_add_client_type_column(
+                    cur, catalog=catalog, mart_schema=mart_schema,
+                    logical_name=_name, dry_run=bool(args.dry_run),
+                )
+                _maybe_add_client_type_title_column(
+                    cur, catalog=catalog, mart_schema=mart_schema,
+                    logical_name=_name, dry_run=bool(args.dry_run),
+                )
+                _maybe_add_arpu_monthly_column(
+                    cur, catalog=catalog, mart_schema=mart_schema,
+                    logical_name=_name, dry_run=bool(args.dry_run),
+                )
             _maybe_migrate_kpi_arpu_paying_owners_column(
                 cur,
                 catalog=catalog,
