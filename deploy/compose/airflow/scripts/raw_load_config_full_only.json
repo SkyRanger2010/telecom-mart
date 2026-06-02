@@ -1,0 +1,72 @@
+{
+  "source": {
+    "dsn_env": "HALK_PG_DSN",
+    "raw_load_source_id": "halk_postgresql",
+    "host_env": "HALK_PG_HOST",
+    "port_env": "HALK_PG_PORT",
+    "db_env": "HALK_PG_DB",
+    "user_env": "HALK_PG_USER",
+    "password_env": "HALK_PG_PASSWORD",
+    "sslmode_env": "HALK_PG_SSLMODE",
+    "default_host": "host.docker.internal",
+    "default_port": 15432,
+    "default_db": "halk",
+    "default_schema": "public",
+    "log_schema": "public",
+    "log_table": "global_log",
+    "default_sslmode": "require"
+  },
+  "target": {
+    "host_env": "TRINO_HOST",
+    "port_env": "TRINO_INTERNAL_PORT",
+    "user_env": "TRINO_USER",
+    "catalog_env": "TRINO_CATALOG",
+    "http_scheme_env": "TRINO_HTTP_SCHEME",
+    "default_host": "trino",
+    "default_port": 8080,
+    "default_user": "airflow",
+    "default_catalog": "iceberg",
+    "default_http_scheme": "http",
+    "default_schema": "raw",
+    "verify_connection_sql": "SELECT 1"
+  },
+  "load": {
+    "batch_size": 20000,
+    "source_fetch_batch_size": 20000,
+    "target_insert_batch_size": 20000,
+    "batch_service": {
+      "state_table": "raw_load_service_state",
+      "loader_name": "raw_day_full_tables_only",
+      "bootstrap_last_loaded_day": "2023-12-31"
+    }
+  },
+  "dds": {
+    "schema": "dds",
+    "state_table": "dds_load_service_state",
+    "loader_name": "dds_initial_loader"
+  },
+  "pipeline": {
+    "catalog": "iceberg",
+    "raw_schema": "raw",
+    "validate_schema": "validate",
+    "dds_schema": "dds",
+    "mart_schema": "mart"
+  },
+  "tables": [
+    {
+      "name": "public.segments",
+      "mode": "full",
+      "primary_key": ["id"]
+    },
+    {
+      "name": "public.order_base_types",
+      "mode": "full",
+      "primary_key": ["id"]
+    },
+    {
+      "name": "public.packages",
+      "mode": "full",
+      "primary_key": ["id"]
+    }
+  ]
+}

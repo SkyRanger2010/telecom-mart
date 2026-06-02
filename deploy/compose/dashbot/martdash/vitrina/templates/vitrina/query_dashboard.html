@@ -1,0 +1,626 @@
+{% extends "vitrina/base.html" %}
+
+{% block title %}Дашборд по запросу · KPI{% endblock %}
+
+{% block content %}
+<style>
+  .workspace-inner.query-dashboard-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .workspace-inner.query-dashboard-layout aside.chat-card { display: none !important; }
+
+  .query-dashboard-page {
+    max-width: min(1760px, 100%);
+    margin: 0 auto;
+    padding: 1rem 1.35rem 1.25rem;
+  }
+  .query-page-head {
+    margin: 0 0 1rem;
+    padding-bottom: 0.85rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .query-page-head h2 {
+    margin: 0;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--text);
+    font-size: 1.15rem;
+    font-weight: 600;
+  }
+  .query-page-head .muted { margin: 0.35rem 0 0; }
+
+  .query-dash-grid {
+    display: grid;
+    grid-template-columns: minmax(300px, 26rem) minmax(0, 1fr);
+    gap: 1.25rem 1.75rem;
+    align-items: start;
+  }
+  @media (max-width: 960px) {
+    .query-dash-grid { grid-template-columns: 1fr; }
+  }
+
+  .query-sidebar {
+    position: sticky;
+    top: 0.75rem;
+    max-height: calc(100vh - 6.5rem);
+    overflow-y: auto;
+    padding-right: 0.35rem;
+  }
+  .query-sidebar-title {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    font-weight: 600;
+    margin: 0 0 0.65rem;
+  }
+  .query-sidebar label.block-label {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin-bottom: 0.35rem;
+  }
+  #qd-question {
+    width: 100%;
+    min-height: 5.5rem;
+    resize: vertical;
+    font-size: 0.9rem;
+    line-height: 1.4;
+  }
+  .query-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    margin: 0.65rem 0 0.85rem;
+  }
+  .query-actions button { width: 100%; }
+  #qd-status { font-size: 0.8rem; min-height: 1.2rem; }
+
+  .query-debug-toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px dashed var(--border);
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    user-select: none;
+  }
+  .query-debug-toggle input {
+    margin: 0.15rem 0 0;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+  .query-debug-block {
+    margin-top: 0.65rem;
+  }
+  .query-debug-block.is-hidden {
+    display: none;
+  }
+  .query-debug-block .query-sidebar-title {
+    color: #fbbf24;
+  }
+  .query-debug-note {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin: 0 0 0.65rem;
+    line-height: 1.35;
+  }
+  .query-debug-panel {
+    margin-bottom: 0.65rem;
+  }
+  .query-debug-panel summary {
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text);
+    padding: 0.35rem 0;
+    list-style: none;
+  }
+  .query-debug-panel summary::-webkit-details-marker { display: none; }
+  .query-debug-panel summary::before {
+    content: "▸ ";
+    color: var(--muted);
+    font-size: 0.7rem;
+  }
+  .query-debug-panel[open] summary::before { content: "▾ "; }
+  .query-debug-body {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: rgba(15, 20, 25, 0.45);
+    padding: 0.45rem 0.55rem;
+    max-height: min(220px, 28vh);
+    overflow: auto;
+  }
+  .query-debug-body pre {
+    margin: 0;
+    font-size: 0.68rem;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .query-debug-placeholder {
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .query-main { min-width: 0; }
+  .query-viz-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    margin-bottom: 0.75rem;
+  }
+  .query-viz-head h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .viz-type-badge {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  #qd-error { margin-bottom: 0.75rem; }
+  .query-viz-area {
+    min-height: min(420px, 50vh);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    background: rgba(30, 41, 59, 0.2);
+  }
+  .query-viz-placeholder {
+    color: var(--muted);
+    font-size: 0.9rem;
+    margin: 2rem 0;
+    text-align: center;
+  }
+  .query-viz-area .chart-section { margin: 0 0 0.85rem; }
+  .query-kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 0.65rem;
+  }
+  .query-kpi-chip {
+    background: rgba(59, 130, 246, 0.1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 0.85rem;
+  }
+  .query-kpi-chip .lbl {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-bottom: 0.3rem;
+  }
+  .query-kpi-chip .num {
+    font-size: 1.25rem;
+    font-weight: 600;
+  }
+  .query-table-wrap { overflow: auto; max-height: min(480px, 55vh); }
+  #qd-empty { display: none; margin-bottom: 0.85rem; }
+</style>
+
+<div class="card query-dashboard-page">
+  <header class="query-page-head">
+    <h2>Дашборд по запросу</h2>
+    <p class="muted">
+      Запрос уходит в DeepSeek (llm-api), ответ проверяет sqlguard, по нему пересоздаётся таблица
+      <code>dashboard_query_stub</code> в ClickHouse; дашборд читает её и строит вид (таблица, график, KPI).
+    </p>
+  </header>
+
+  <div class="query-dash-grid">
+    <aside class="query-sidebar" aria-label="Запрос и отладка пайплайна">
+      <div class="query-sidebar-title">Запрос</div>
+      <label class="block-label" for="qd-question">Текст запроса</label>
+      <textarea id="qd-question" placeholder="Например: сколько активных клиентов по сегментам за последний месяц"></textarea>
+      <div class="query-actions">
+        <button type="button" id="qd-submit">Выполнить запрос</button>
+        <button type="button" id="qd-clear" class="btn-secondary" style="background:transparent;border:1px solid var(--border);color:var(--text);">Очистить</button>
+      </div>
+      <div id="qd-status" class="muted" aria-live="polite"></div>
+
+      <label class="query-debug-toggle" for="qd-show-debug">
+        <input type="checkbox" id="qd-show-debug" />
+        <span>Показать отладочную информацию</span>
+      </label>
+
+      <section class="query-debug-block is-hidden" id="qd-debug-block" aria-label="Отладка NL2SQL" hidden>
+        <p class="query-sidebar-title">Отладка пайплайна</p>
+        <p class="query-debug-note">Запрос в модель, сырой ответ LLM, ответ sqlguard и итоговый SQL.</p>
+
+        <details class="query-debug-panel" id="qd-debug-request-wrap">
+          <summary>Запрос в модель (JSON)</summary>
+          <div class="query-debug-body" id="qd-debug-request">
+            <p class="query-debug-placeholder">—</p>
+          </div>
+        </details>
+
+        <details class="query-debug-panel" id="qd-debug-llm-wrap">
+          <summary>Ответ модели</summary>
+          <div class="query-debug-body" id="qd-debug-llm">
+            <p class="query-debug-placeholder">—</p>
+          </div>
+        </details>
+
+        <details class="query-debug-panel" id="qd-debug-guard-wrap">
+          <summary>Ответ sqlguard</summary>
+          <div class="query-debug-body" id="qd-debug-guard">
+            <p class="query-debug-placeholder">—</p>
+          </div>
+        </details>
+
+        <details class="query-debug-panel" id="qd-debug-sql-wrap" open>
+          <summary>SQL материализации и чтения</summary>
+          <div class="query-debug-body" id="qd-debug-sql">
+            <p class="query-debug-placeholder">—</p>
+          </div>
+        </details>
+      </section>
+    </aside>
+
+    <div class="query-main">
+      <div id="qd-error" class="err" style="display:none;"></div>
+      <div class="query-viz-head">
+        <h3>Данные</h3>
+        <span class="viz-type-badge" id="qd-viz-type" hidden></span>
+        <span class="muted" id="qd-row-hint" style="font-size:0.8rem;"></span>
+      </div>
+      <div class="query-viz-area" id="qd-viz-area">
+        <p class="query-viz-placeholder" id="qd-viz-placeholder">Выполните запрос слева — результат отобразится здесь.</p>
+        <div id="qd-empty" class="data-empty-notice" style="display:none;" role="status"></div>
+        <div class="query-kpi-row" id="qd-kpi-row" style="display:none;"></div>
+        <section class="chart-section" id="qd-chart-section" style="display:none;" aria-label="График по запросу">
+          <div class="chart-row">
+            <div class="chart-canvas-wrap chart-wrap">
+              <canvas id="qd-chart"></canvas>
+            </div>
+            <aside class="series-toggles" aria-label="Ряды данных">
+              <div class="series-toggles-title">Показать ряды</div>
+              <div id="qd-series-toggles"></div>
+            </aside>
+          </div>
+        </section>
+        <div class="query-table-wrap" id="qd-table-wrap" style="display:none;">
+          <table class="data" id="qd-data-table">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{{ api_url|json_script:"qd-api-url" }}
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  var apiEl = document.getElementById("qd-api-url");
+  if (!apiEl) return;
+  var apiUrl = JSON.parse(apiEl.textContent || '""');
+  var chartInstance = null;
+  var qdSeriesVisible = new Set();
+  var qdChartResizeTimer = null;
+  var qInput = document.getElementById("qd-question");
+  var statusEl = document.getElementById("qd-status");
+  var errEl = document.getElementById("qd-error");
+  var vizTypeEl = document.getElementById("qd-viz-type");
+  var rowHintEl = document.getElementById("qd-row-hint");
+  var placeholderEl = document.getElementById("qd-viz-placeholder");
+  var kpiRow = document.getElementById("qd-kpi-row");
+  var emptyEl = document.getElementById("qd-empty");
+  var chartSection = document.getElementById("qd-chart-section");
+  var chartToggles = document.getElementById("qd-series-toggles");
+  var tableWrap = document.getElementById("qd-table-wrap");
+  var dataTable = document.getElementById("qd-data-table");
+  var debugRequestEl = document.getElementById("qd-debug-request");
+  var debugLlmEl = document.getElementById("qd-debug-llm");
+  var debugGuardEl = document.getElementById("qd-debug-guard");
+  var debugSqlEl = document.getElementById("qd-debug-sql");
+  var showDebugCb = document.getElementById("qd-show-debug");
+  var debugBlockEl = document.getElementById("qd-debug-block");
+  var lastDebugPayload = null;
+  var DEBUG_PREF_KEY = "qd-show-debug";
+
+  function isDebugVisible() {
+    return !!(showDebugCb && showDebugCb.checked);
+  }
+
+  function syncDebugPanelVisibility() {
+    if (!debugBlockEl) return;
+    var show = isDebugVisible();
+    debugBlockEl.classList.toggle("is-hidden", !show);
+    debugBlockEl.hidden = !show;
+  }
+
+  function setDebugVisible(show) {
+    if (showDebugCb) showDebugCb.checked = !!show;
+    syncDebugPanelVisibility();
+    try {
+      localStorage.setItem(DEBUG_PREF_KEY, show ? "1" : "0");
+    } catch (e) { /* ignore */ }
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function setPre(el, text) {
+    if (!el) return;
+    if (!text) {
+      el.innerHTML = "<p class=\"query-debug-placeholder\">—</p>";
+      return;
+    }
+    el.innerHTML = "<pre>" + esc(text) + "</pre>";
+  }
+
+  function setJsonPre(el, obj) {
+    if (!el) return;
+    if (obj == null) {
+      el.innerHTML = "<p class=\"query-debug-placeholder\">—</p>";
+      return;
+    }
+    try {
+      setPre(el, JSON.stringify(obj, null, 2));
+    } catch (e) {
+      setPre(el, String(obj));
+    }
+  }
+
+  function renderDebug(p) {
+    lastDebugPayload = p;
+    if (!isDebugVisible()) return;
+    fillDebugPanels(p);
+  }
+
+  function fillDebugPanels(p) {
+    if (!p) return;
+    setJsonPre(debugRequestEl, p.nl2sql_request);
+    setPre(debugLlmEl, p.assistant_raw || "");
+    setJsonPre(debugGuardEl, p.guard_detail);
+    var parts = [];
+    var mat = p.materialize_sql;
+    if (mat && mat.length) {
+      parts.push("-- materialize (DROP + CREATE AS SELECT)\n" + mat.join(";\n\n"));
+    }
+    var src = p.sql || p.sql_candidate || "";
+    if (src) parts.push("-- исходный SELECT от sqlguard\n" + src);
+    if (p.read_sql) parts.push("-- чтение дашборда\n" + p.read_sql);
+    var sqlText = parts.join("\n\n");
+    setPre(debugSqlEl, sqlText);
+    if (p.warnings && p.warnings.length && debugSqlEl) {
+      debugSqlEl.innerHTML =
+        "<pre>" + esc(sqlText) + "</pre>" +
+        "<p class=\"query-debug-placeholder\" style=\"margin-top:0.45rem;color:#fbbf24;\">warnings: " +
+        esc(p.warnings.join("; ")) + "</p>";
+    }
+  }
+
+  function clearDebug() {
+    lastDebugPayload = null;
+    [debugRequestEl, debugLlmEl, debugGuardEl, debugSqlEl].forEach(function (el) {
+      if (el) el.innerHTML = "<p class=\"query-debug-placeholder\">—</p>";
+    });
+  }
+
+  function setError(msg) {
+    if (!errEl) return;
+    if (msg) {
+      errEl.textContent = msg;
+      errEl.style.display = "block";
+    } else {
+      errEl.textContent = "";
+      errEl.style.display = "none";
+    }
+  }
+
+  function qdChartReadWidth() {
+    var canvas = document.getElementById("qd-chart");
+    if (canvas && canvas.parentElement) {
+      var r = canvas.parentElement.getBoundingClientRect();
+      if (r && r.width > 80) return r.width;
+    }
+    var main = document.querySelector(".query-main");
+    if (main) {
+      var r2 = main.getBoundingClientRect();
+      if (r2 && r2.width > 80) return r2.width;
+    }
+    return window.innerWidth || 1280;
+  }
+
+  function qdScheduleChartLayout() {
+    if (qdChartResizeTimer) clearTimeout(qdChartResizeTimer);
+    qdChartResizeTimer = setTimeout(function () {
+      qdChartResizeTimer = null;
+      if (chartInstance && window.TmKpiLineChart) {
+        window.TmKpiLineChart.applyResponsiveLayout(chartInstance, qdChartReadWidth);
+      }
+    }, 120);
+  }
+
+  function renderEmpty(message, hint) {
+    if (!emptyEl) return;
+    emptyEl.innerHTML =
+      '<p class="data-empty-title">' + esc(message || "По вашему запросу данных не найдено.") + "</p>" +
+      '<p class="data-empty-hint">' +
+      esc(hint || "Уточните период или фильтры и попробуйте переформулировать запрос.") +
+      "</p>";
+    emptyEl.style.display = "block";
+  }
+
+  function hideViz() {
+    if (placeholderEl) placeholderEl.style.display = "block";
+    if (emptyEl) {
+      emptyEl.innerHTML = "";
+      emptyEl.style.display = "none";
+    }
+    if (kpiRow) kpiRow.style.display = "none";
+    if (chartSection) chartSection.style.display = "none";
+    if (chartToggles) chartToggles.innerHTML = "";
+    if (tableWrap) tableWrap.style.display = "none";
+    if (vizTypeEl) vizTypeEl.hidden = true;
+    if (window.TmKpiLineChart) window.TmKpiLineChart.destroy(chartInstance);
+    else if (chartInstance) chartInstance.destroy();
+    chartInstance = null;
+    qdSeriesVisible = new Set();
+  }
+
+  function renderTable(columns, rows) {
+    if (!dataTable) return;
+    var thead = dataTable.querySelector("thead");
+    var tbody = dataTable.querySelector("tbody");
+    var hr = "<tr>";
+    columns.forEach(function (c) { hr += "<th>" + esc(c) + "</th>"; });
+    hr += "</tr>";
+    thead.innerHTML = hr;
+    var body = "";
+    rows.forEach(function (row) {
+      body += "<tr>";
+      row.forEach(function (cell) {
+        body += "<td>" + esc(cell === null ? "" : cell) + "</td>";
+      });
+      body += "</tr>";
+    });
+    tbody.innerHTML = body;
+    if (tableWrap) tableWrap.style.display = "block";
+  }
+
+  function renderKpis(kpis) {
+    if (!kpiRow) return;
+    kpiRow.innerHTML = "";
+    (kpis || []).forEach(function (k) {
+      var chip = document.createElement("div");
+      chip.className = "query-kpi-chip";
+      chip.innerHTML = "<div class=\"lbl\">" + esc(k.label) + "</div><div class=\"num\">" + esc(k.value) + "</div>";
+      kpiRow.appendChild(chip);
+    });
+    kpiRow.style.display = "grid";
+  }
+
+  function renderChart(spec) {
+    var canvas = document.getElementById("qd-chart");
+    if (!chartSection || !canvas || !window.TmKpiLineChart || !spec) return;
+    if (window.TmKpiLineChart) window.TmKpiLineChart.destroy(chartInstance);
+    chartInstance = null;
+    if (chartToggles) chartToggles.innerHTML = "";
+    qdSeriesVisible = new Set();
+    var mounted = window.TmKpiLineChart.mount({
+      canvas: canvas,
+      togglesEl: chartToggles,
+      spec: spec,
+      visibleSet: qdSeriesVisible,
+      readWidth: qdChartReadWidth,
+    });
+    chartInstance = mounted.chart;
+    if (chartInstance) {
+      chartSection.style.display = "block";
+      window.TmKpiLineChart.applyResponsiveLayout(chartInstance, qdChartReadWidth);
+    }
+  }
+
+  function renderPayload(p) {
+    hideViz();
+    if (placeholderEl) placeholderEl.style.display = "none";
+    if (vizTypeEl) {
+      vizTypeEl.textContent = p.viz_label || p.viz_type || "";
+      vizTypeEl.hidden = false;
+    }
+    if (rowHintEl) {
+      var hint = "";
+      if (typeof p.row_count === "number") hint = "Строк: " + p.row_count;
+      rowHintEl.textContent = hint;
+    }
+
+    var vt = p.viz_type || "table";
+    var isEmpty = !!(p.empty || p.row_count === 0 || (p.rows && !p.rows.length));
+    if (isEmpty) {
+      renderEmpty(p.message, p.hint);
+    } else if (vt === "kpi" && p.chart && p.chart.kpis) {
+      renderKpis(p.chart.kpis);
+    } else if (vt === "timeseries" && p.chart) {
+      renderChart(p.chart);
+    }
+    if (!isEmpty && vt !== "kpi" && p.columns && p.rows && p.rows.length) {
+      renderTable(p.columns, p.rows);
+    }
+  }
+
+  async function submitQuery() {
+    var q = (qInput && qInput.value || "").trim();
+    if (!q) {
+      if (statusEl) statusEl.textContent = "Введите запрос";
+      return;
+    }
+    setError("");
+    if (statusEl) statusEl.textContent = "Загрузка…";
+    hideViz();
+    var btn = document.getElementById("qd-submit");
+    if (btn) btn.disabled = true;
+    try {
+      var r = await fetch(apiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": typeof CSRF !== "undefined" ? CSRF : "",
+        },
+        body: JSON.stringify({ question: q }),
+      });
+      var p = await r.json();
+      renderDebug(p);
+      if (!p.ok) {
+        if (statusEl) statusEl.textContent = "Ошибка";
+        setError(p.error || "Не удалось выполнить запрос");
+        return;
+      }
+      if (statusEl) statusEl.textContent = "Готово";
+      renderPayload(p);
+    } catch (e) {
+      if (statusEl) statusEl.textContent = "";
+      setError("Сеть: " + e);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  if (showDebugCb) {
+    showDebugCb.addEventListener("change", function () {
+      var show = isDebugVisible();
+      syncDebugPanelVisibility();
+      try {
+        localStorage.setItem(DEBUG_PREF_KEY, show ? "1" : "0");
+      } catch (e) { /* ignore */ }
+      if (show && lastDebugPayload) fillDebugPanels(lastDebugPayload);
+    });
+    try {
+      setDebugVisible(localStorage.getItem(DEBUG_PREF_KEY) === "1");
+    } catch (e) {
+      setDebugVisible(false);
+    }
+  }
+
+  document.getElementById("qd-submit").addEventListener("click", submitQuery);
+  document.getElementById("qd-clear").addEventListener("click", function () {
+    if (qInput) qInput.value = "";
+    if (statusEl) statusEl.textContent = "";
+    setError("");
+    hideViz();
+    clearDebug();
+    if (placeholderEl) placeholderEl.style.display = "block";
+    if (rowHintEl) rowHintEl.textContent = "";
+  });
+
+  var workspaceInner = document.querySelector(".workspace-inner");
+  if (workspaceInner) workspaceInner.classList.add("query-dashboard-layout");
+  window.addEventListener("resize", qdScheduleChartLayout);
+})();
+</script>
+{% endblock %}

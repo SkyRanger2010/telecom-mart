@@ -1,0 +1,45 @@
+{
+  "version": "1.0",
+  "task": "nl2sql_clickhouse",
+  "locale": "ru",
+  "question": "Сравни сумму АБ0 и приток новых клиентов по сегментам за март 2024",
+  "database": {
+    "engine": "clickhouse",
+    "name": "serving",
+    "table_qualifier": "serving"
+  },
+  "constraints": {
+    "dialect": "clickhouse",
+    "only_select": true,
+    "max_rows": 500,
+    "forbidden": ["INSERT", "UPDATE", "DELETE", "DDL", "SYSTEM", "FORMAT", "INTO OUTFILE"],
+    "single_statement": true
+  },
+  "defaults": {
+    "date_from": "2024-03-01",
+    "date_to": "2024-03-31"
+  },
+  "data_catalog": {
+    "available_date_range": {
+      "min": "2024-01-01",
+      "max": "2025-04-30"
+    }
+  },
+  "filters": {
+    "segment_ids": [],
+    "service_kinds": [],
+    "tariff_ids": [],
+    "client_types": []
+  },
+  "glossary": {
+    "АБ0": "kpi_ab0_daily.active_subscribers — активные на дату",
+    "АБ30": "kpi_ab30_daily.active_subscribers — окно 30 дней",
+    "АБ90": "kpi_ab90_daily.active_subscribers — окно 90 дней",
+    "ARPU": "kpi_arpu_daily: arpu_daily или sum(total_revenue)/nullIf(sum(active_clients),0)",
+    "выручка": "kpi_revenue_daily.total_revenue (день) или kpi_revenue_active_* (период)",
+    "приток": "kpi_inflow_daily.new_clients",
+    "отток": "kpi_outflow_daily.churned_clients"
+  },
+  "vitrinas": [],
+  "examples": []
+}

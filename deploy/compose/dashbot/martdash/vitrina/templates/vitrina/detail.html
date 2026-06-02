@@ -1,0 +1,290 @@
+{% extends "vitrina/base.html" %}
+
+{% block title %}{{ meta.title_ru }} · KPI{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2 style="text-transform:none; letter-spacing:0; color:var(--text); font-size:1.1rem;">{{ meta.title_ru }}</h2>
+  <p class="muted">{{ meta.description_ru }} Таблица: <code>{{ meta.table }}</code></p>
+
+  <p>
+    <a class="btn secondary" href="{% url 'vitrina_detail' meta.table %}">Сбросить период и разрезы</a>
+  </p>
+
+  <p class="muted" style="margin:0.35rem 0 0.5rem;">
+    Разрезы — необязательные фильтры: пустое значение поля означает «по всем значениям этого измерения» (совокупно).
+  </p>
+
+  <form method="get" class="filters">
+    <div class="row">
+      <div>
+        <label for="id_df">Дата от</label>
+        <input type="date" name="df" id="id_df" value="{{ date_from|date:'Y-m-d' }}" />
+      </div>
+      <div>
+        <label for="id_dt">Дата по</label>
+        <input type="date" name="dt" id="id_dt" value="{{ date_to|date:'Y-m-d' }}" />
+      </div>
+      {% if not is_ab0 %}
+      <div>
+        <label for="id_group">Разрез графика</label>
+        <select name="group" id="id_group">
+          {% for code, lbl in grouping_choices %}
+          <option value="{{ code }}" {% if code == group_axis %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% else %}
+      <input type="hidden" name="group" value="{{ group_axis }}" />
+      {% endif %}
+      <div>
+        <button type="submit">Обновить</button>
+      </div>
+    </div>
+    {% if dimension_filter_rows %}
+    <div class="row dim-filter-grid">
+      {% for row in dimension_filter_rows %}
+      <div>
+        <label for="id_f_{{ row.key }}">{{ row.label }}</label>
+        <select name="f_{{ row.key }}" id="id_f_{{ row.key }}">
+          <option value="" {% if not row.selected %}selected{% endif %}>Все</option>
+          {% for val, lbl in row.choices %}
+          <option value="{{ val }}" {% if row.selected == val %}selected{% endif %}>{{ lbl }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </form>
+
+  {% if used_auto_date_range and data_min_date and data_max_date %}
+    <p class="muted">По умолчанию — весь доступный диапазон по ключу даты: <strong>{{ data_min_date }}</strong> — <strong>{{ data_max_date }}</strong>.</p>
+  {% elif used_auto_date_range %}
+    <p class="muted">Нет min/max в данных — запасной период <strong>{{ date_from }}</strong> — <strong>{{ date_to }}</strong>.</p>
+  {% endif %}
+
+  {% if ch_error %}
+    <div class="err">ClickHouse: {{ ch_error }}</div>
+  {% endif %}
+
+  {% if not ch_error %}
+    {% if chart_payload %}
+    <div class="chart-wrap chart-main">
+      <canvas id="vitrina-chart-canvas"></canvas>
+    </div>
+    {{ chart_payload|json_script:"vitrina-chart-data" }}
+    {% endif %}
+    {% if is_ab0 and chart_payload_inflow %}
+    <div class="chart-wrap chart-flow">
+      <canvas id="vitrina-chart-inflow-canvas"></canvas>
+    </div>
+    {{ chart_payload_inflow|json_script:"vitrina-chart-inflow-data" }}
+    {% endif %}
+    {% if is_ab0 and chart_payload_outflow %}
+    <div class="chart-wrap chart-flow">
+      <canvas id="vitrina-chart-outflow-canvas"></canvas>
+    </div>
+    {{ chart_payload_outflow|json_script:"vitrina-chart-outflow-data" }}
+    {% endif %}
+
+    <div class="kpi-grid" style="margin-top:0.5rem;">
+      {% for label, val in kpis %}
+        <div class="kpi-chip">
+          <div class="lbl">{{ label }}</div>
+          <div class="num">{{ val|default:"—" }}</div>
+        </div>
+      {% endfor %}
+    </div>
+
+    <details style="margin-top:1.25rem;">
+      <summary class="muted">Таблица разреза{% if is_ab0 %} (клик по дате — один день){% endif %}</summary>
+      {% if break_rows %}
+        <table class="data">
+          <thead>
+            <tr>
+              {% for h in break_headers %}
+                <th>{{ h }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+            <tbody>
+            {% for row, drill in break_rows %}
+              <tr>
+                {% for cell in row %}
+                  <td>
+                    {% if forloop.first and drill %}
+                      {% if group_axis == "tariff_id" and row|length > 1 %}
+                        <a class="drill" href="{{ drill }}">{{ row.0|default:"—" }} <span class="muted" style="font-weight:400;">· {{ row.1|default:"" }}</span></a>
+                      {% else %}
+                        <a class="drill" href="{{ drill }}">{{ cell|default:"—" }}</a>
+                      {% endif %}
+                    {% else %}
+                      {{ cell|default:"—" }}
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p class="muted">Нет строк за период.</p>
+      {% endif %}
+    </details>
+
+    {% if sql_breakdown %}
+    <details style="margin-top:0.75rem;">
+      <summary class="muted">SQL агрегации</summary>
+      <pre class="sql-pre">{{ sql_breakdown }}</pre>
+    </details>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+{% if chart_payload or chart_payload_inflow or chart_payload_outflow %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+{% if is_ab0 %}
+<script>
+(function () {
+  if (typeof Chart === "undefined") return;
+
+  function mapLineDatasets(spec, tensionDefault) {
+    return (spec.datasets || []).map(function (d) {
+      return {
+        label: d.label,
+        data: d.data,
+        borderColor: d.borderColor,
+        backgroundColor: d.backgroundColor,
+        borderWidth: typeof d.borderWidth === "number" ? d.borderWidth : 2,
+        fill: false,
+        tension: typeof d.tension === "number" ? d.tension : tensionDefault,
+        pointRadius: typeof d.pointRadius === "number" ? d.pointRadius : 4,
+        pointHoverRadius: typeof d.pointHoverRadius === "number" ? d.pointHoverRadius : 7,
+        pointHitRadius: typeof d.pointHitRadius === "number" ? d.pointHitRadius : 8,
+        pointBackgroundColor: d.pointBackgroundColor || d.borderColor,
+        pointBorderColor: d.pointBorderColor || d.borderColor,
+        pointBorderWidth: typeof d.pointBorderWidth === "number" ? d.pointBorderWidth : 1,
+      };
+    });
+  }
+
+  function mountLineChart(canvasId, dataScriptId, showLegend, tensionDefault) {
+    var el = document.getElementById(dataScriptId);
+    var canvas = document.getElementById(canvasId);
+    if (!el || !canvas) return;
+    var spec = JSON.parse(el.textContent || "{}");
+    if (!spec.labels || !spec.labels.length) return;
+    var datasets = mapLineDatasets(spec, tensionDefault);
+    new Chart(canvas, {
+      type: "line",
+      data: { labels: spec.labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          title: { display: true, text: spec.title || "", color: "#e6edf3" },
+          legend: {
+            display: showLegend,
+            position: "bottom",
+            labels: { color: "#8b9cb3", boxWidth: 12 },
+          },
+        },
+        scales: {
+          x: {
+            title: { display: true, text: spec.xlabel || "Дата", color: "#8b9cb3" },
+            ticks: { color: "#8b9cb3", maxRotation: 45, autoSkip: true, maxTicksLimit: 32 },
+            grid: { color: "rgba(45, 58, 77, 0.6)" },
+          },
+          y: {
+            title: { display: true, text: spec.ylabel || "", color: "#8b9cb3" },
+            ticks: { color: "#8b9cb3" },
+            beginAtZero: true,
+            grid: { color: "rgba(45, 58, 77, 0.6)" },
+          },
+        },
+      },
+    });
+  }
+
+  mountLineChart("vitrina-chart-canvas", "vitrina-chart-data", false, 0.2);
+  mountLineChart("vitrina-chart-inflow-canvas", "vitrina-chart-inflow-data", true, 0.15);
+  mountLineChart("vitrina-chart-outflow-canvas", "vitrina-chart-outflow-data", true, 0.15);
+})();
+</script>
+{% else %}
+<script>
+(function () {
+  var el = document.getElementById("vitrina-chart-data");
+  var canvas = document.getElementById("vitrina-chart-canvas");
+  if (!el || !canvas || typeof Chart === "undefined") return;
+  var spec = JSON.parse(el.textContent || "{}");
+  if (!spec.labels || !spec.labels.length) return;
+
+  var chartType = spec.kind === "bar" ? "bar" : "line";
+  var datasets = (spec.datasets || []).map(function (d) {
+    var base = {
+      label: d.label,
+      data: d.data,
+      borderColor: d.borderColor,
+      backgroundColor: d.backgroundColor,
+      borderWidth: typeof d.borderWidth === "number" ? d.borderWidth : chartType === "bar" ? 1 : 2,
+      fill: d.fill === true,
+      tension: typeof d.tension === "number" ? d.tension : 0.15,
+    };
+    if (chartType === "line") {
+      base.pointRadius = typeof d.pointRadius === "number" ? d.pointRadius : 3;
+      base.pointHoverRadius = typeof d.pointHoverRadius === "number" ? d.pointHoverRadius : 6;
+      base.pointHitRadius = typeof d.pointHitRadius === "number" ? d.pointHitRadius : 8;
+      base.pointBackgroundColor = d.pointBackgroundColor || d.borderColor;
+      base.pointBorderColor = d.pointBorderColor || d.borderColor;
+      base.pointBorderWidth = typeof d.pointBorderWidth === "number" ? d.pointBorderWidth : 1;
+    }
+    return base;
+  });
+
+  var opts = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      title: { display: true, text: spec.title || "", color: "#e6edf3" },
+      legend: { display: datasets.length > 1, position: "bottom", labels: { color: "#8b9cb3" } },
+    },
+    scales: {
+      x: {
+        title: { display: !!spec.xlabel, text: spec.xlabel || "", color: "#8b9cb3" },
+        ticks: {
+          color: "#8b9cb3",
+          maxRotation: chartType === "line" ? 45 : 60,
+          autoSkip: true,
+          maxTicksLimit: chartType === "line" ? 28 : 40,
+        },
+        grid: { color: "rgba(45, 58, 77, 0.5)" },
+      },
+      y: {
+        title: { display: !!spec.ylabel, text: spec.ylabel || "Значение", color: "#8b9cb3" },
+        ticks: { color: "#8b9cb3" },
+        beginAtZero: chartType === "bar",
+        grid: { color: "rgba(45, 58, 77, 0.5)" },
+      },
+    },
+  };
+  if (spec.indexAxis === "y") {
+    opts.indexAxis = "y";
+    opts.scales.x = { beginAtZero: true, ticks: { color: "#8b9cb3", autoSkip: true }, title: { display: true, text: spec.ylabel || "Значение", color: "#8b9cb3" }, grid: { color: "rgba(45, 58, 77, 0.5)" } };
+    opts.scales.y = { ticks: { color: "#8b9cb3", maxRotation: 0 }, title: { display: true, text: spec.xlabel || "", color: "#8b9cb3" }, grid: { color: "rgba(45, 58, 77, 0.5)" } };
+  }
+
+  new Chart(canvas, {
+    type: chartType,
+    data: { labels: spec.labels, datasets: datasets },
+    options: opts,
+  });
+})();
+</script>
+{% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,496 @@
+{% extends "vitrina/base.html" %}
+
+{% block title %}{{ dash_cfg.page.title|default:"Финансовые показатели" }} · KPI{% endblock %}
+
+{% block content %}
+<style>
+  .workspace-inner.subscriber-layout { grid-template-columns: minmax(0, 1fr) !important; }
+  .workspace-inner.subscriber-layout aside.chat-card { display: none !important; }
+  .subscriber-dashboard.subscriber-page {
+    max-width: min(1760px, 100%);
+    margin: 0 auto;
+    padding: 1rem 1.35rem 1.25rem;
+  }
+  .subscriber-page-head { margin: 0 0 1rem; padding-bottom: 0.85rem; border-bottom: 1px solid var(--border); }
+  .subscriber-page-head h2 { margin: 0; font-size: 1.15rem; font-weight: 600; }
+  .subscriber-dash-grid {
+    display: grid;
+    grid-template-columns: minmax(272px, 19rem) minmax(0, 1fr);
+    gap: 1.25rem 1.75rem;
+  }
+  @media (max-width: 1080px) { .subscriber-dash-grid { grid-template-columns: 1fr; } }
+  .subscriber-sidebar { position: sticky; top: 0.75rem; max-height: calc(100vh - 6.5rem); overflow-y: auto; }
+  .subscriber-sidebar-title {
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); font-weight: 600; margin: 0 0 0.75rem;
+  }
+  .subscriber-filters-panel { display: flex; flex-direction: column; gap: 1rem; }
+  .filter-block label.filter-title { display: block; font-size: 0.82rem; font-weight: 600; margin-bottom: 0.25rem; }
+  .filter-actions { display: flex; gap: 0.5rem; margin-bottom: 0.35rem; }
+  .filter-actions button { background: transparent; border: none; color: var(--accent); cursor: pointer; }
+  .filter-checklist {
+    max-height: min(11rem, 28vh); overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.45rem;
+  }
+  .filter-checklist.disabled { opacity: 0.55; pointer-events: none; }
+  .filter-checklist-client-type { max-height: min(16rem, 36vh); padding: 0.4rem 0.5rem; }
+  .filter-client-type-quick { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.45rem; }
+  .filter-quick-pick {
+    font-size: 0.72rem; padding: 0.2rem 0.45rem; border-radius: 4px;
+    border: 1px solid var(--border); background: rgba(59, 130, 246, 0.12);
+    color: var(--accent); cursor: pointer;
+  }
+  .filter-quick-pick:hover:not(:disabled) { background: rgba(59, 130, 246, 0.22); }
+  .filter-quick-pick:disabled { opacity: 0.5; cursor: not-allowed; }
+  .filter-date-quick { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.4rem; }
+  .filter-date-quick .filter-quick-pick.active {
+    background: rgba(59, 130, 246, 0.35); border-color: var(--accent); font-weight: 600;
+  }
+  .client-type-group { margin-bottom: 0.55rem; }
+  .client-type-group-title { font-weight: 600; font-size: 0.8rem; }
+  .client-type-group-items {
+    padding-left: 0.35rem; border-left: 2px solid rgba(59, 130, 246, 0.25); margin-left: 0.15rem;
+  }
+  .filter-check-row { display: flex; gap: 0.4rem; font-size: 0.82rem; margin: 0.2rem 0; cursor: pointer; }
+  .subscriber-toolbar { display: flex; flex-direction: column; gap: 0.45rem; margin-top: 0.85rem; }
+  .subscriber-toolbar button { width: 100%; }
+  .subscriber-toolbar .btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .subscriber-main .chart-section { margin-top: 1.35rem; padding-top: 0.85rem; border-top: 1px solid var(--border); }
+  .subscriber-main .chart-section:first-of-type { margin-top: 0; padding-top: 0; border-top: none; }
+  .chart-section h3 { margin: 0 0 0.55rem; font-size: 1rem; font-weight: 600; }
+  .chart-canvas-wrap { min-height: 240px; height: clamp(240px, 30vh, 360px); position: relative; }
+</style>
+
+<div class="card subscriber-dashboard subscriber-page">
+  <header class="subscriber-page-head">
+    <h2>{{ dash_cfg.page.title|default:"Финансовые показатели" }}</h2>
+    {% if dash_cfg.page.subtitle %}<p class="muted">{{ dash_cfg.page.subtitle }}</p>{% endif %}
+  </header>
+
+  <div class="subscriber-dash-grid">
+    <aside class="subscriber-sidebar">
+      <div class="subscriber-sidebar-title">{{ dash_cfg.filters.sidebar_title|default:"Фильтры" }}</div>
+      <div class="subscriber-filters-panel">
+        <div class="filter-block">
+          <label class="filter-title" for="id_range_picker">{{ dash_cfg.filters.date_range|default:"Период" }}</label>
+          <input type="text" id="id_range_picker" autocomplete="off" style="width:100%;" />
+          <div id="date-range-quick" class="filter-date-quick" role="group" aria-label="{{ dash_cfg.filters.date_quick_picks_aria|default:'Быстрый выбор периода' }}"></div>
+          <input type="hidden" id="id_df" value="{{ date_from|date:'Y-m-d' }}" />
+          <input type="hidden" id="id_dt" value="{{ date_to|date:'Y-m-d' }}" />
+        </div>
+        <div class="filter-block" data-filter="client_type">
+          <label class="filter-title">{{ dash_cfg.filters.client_type|default:"Тип клиента" }}</label>
+          <div class="filter-actions">
+            <button type="button" data-action="all">{{ dash_cfg.filters.select_all|default:"Все" }}</button>
+            <button type="button" data-action="none">{{ dash_cfg.filters.clear_all|default:"Снять" }}</button>
+          </div>
+          <div class="filter-checklist filter-checklist-client-type" id="list-client-type"></div>
+        </div>
+        <div class="filter-block" data-filter="segment">
+          <label class="filter-title">{{ dash_cfg.filters.segment|default:"Направление деятельности" }}</label>
+          <div class="filter-actions">
+            <button type="button" data-action="all">{{ dash_cfg.filters.select_all|default:"Все" }}</button>
+            <button type="button" data-action="none">{{ dash_cfg.filters.clear_all|default:"Снять" }}</button>
+          </div>
+          <div class="filter-checklist" id="list-segment"></div>
+        </div>
+        <div class="filter-block" data-filter="service_kind">
+          <label class="filter-title">{{ dash_cfg.filters.service_kind|default:"Услуга" }}</label>
+          <div class="filter-actions">
+            <button type="button" data-action="all">{{ dash_cfg.filters.select_all|default:"Все" }}</button>
+            <button type="button" data-action="none">{{ dash_cfg.filters.clear_all|default:"Снять" }}</button>
+          </div>
+          <div class="filter-checklist" id="list-service-kind"></div>
+        </div>
+        <div class="filter-block" data-filter="tariff">
+          <label class="filter-title">{{ dash_cfg.filters.tariff|default:"Тариф" }}</label>
+          <div class="filter-actions">
+            <button type="button" data-action="all">{{ dash_cfg.filters.select_all|default:"Все" }}</button>
+            <button type="button" data-action="none">{{ dash_cfg.filters.clear_all|default:"Снять" }}</button>
+          </div>
+          <div class="filter-checklist" id="list-tariff"></div>
+        </div>
+      </div>
+      <div class="subscriber-toolbar">
+        <button type="button" id="btn-refresh">{{ dash_cfg.buttons.refresh|default:"Обновить" }}</button>
+        <button type="button" id="btn-reset" class="btn-secondary">{{ dash_cfg.buttons.reset|default:"Сбросить" }}</button>
+      </div>
+      <div id="financial-status" class="muted" style="margin-top:0.65rem;font-size:0.8rem;"></div>
+      {% if used_auto_date_range and data_min_date and data_max_date %}
+      <p class="muted" style="margin-top:0.5rem;font-size:0.78rem;">
+        По умолчанию: <strong>{{ data_min_date }}</strong> — <strong>{{ data_max_date }}</strong>.
+      </p>
+      {% endif %}
+    </aside>
+
+    <div class="subscriber-main">
+      <div id="financial-error" class="err" style="display:none;margin-bottom:1rem;"></div>
+      <section class="chart-section">
+        <h3 id="arpu-chart-title">{{ dash_cfg.charts.arpu.title|default:"ARPU" }}</h3>
+        <div class="chart-canvas-wrap"><canvas id="chart-arpu"></canvas></div>
+      </section>
+      <section class="chart-section">
+        <h3 id="revenue-chart-title">{{ dash_cfg.charts.normalized_revenue.title|default:"Приведённая дневная выручка" }}</h3>
+        <div class="chart-canvas-wrap"><canvas id="chart-revenue"></canvas></div>
+      </section>
+    </div>
+  </div>
+</div>
+
+{{ dash_cfg|json_script:"financial-dash-cfg" }}
+{{ boot|json_script:"financial-boot" }}
+{% endblock %}
+
+{% block extra_js %}
+{% load static %}
+<script src="{% static 'vitrina/client_type_filter.js' %}"></script>
+<script src="{% static 'vitrina/date_range_filter.js' %}"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/themes/dark.css" crossorigin="anonymous" />
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/l10n/ru.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var boot = JSON.parse(document.getElementById("financial-boot").textContent || "{}");
+  var dashCfg = JSON.parse(document.getElementById("financial-dash-cfg").textContent || "{}");
+  var msgs = dashCfg.messages || {};
+  var CtFilter = typeof VitrinaClientTypeFilter !== "undefined" ? VitrinaClientTypeFilter : null;
+  var state = { segment: new Set(), service_kind: new Set(), tariff: new Set(), client_type: new Set() };
+
+  function clientTypeFilterOpts() {
+    return { messages: msgs, labels: dashCfg.filters || {} };
+  }
+  function readClientTypeFilter() {
+    if (CtFilter) CtFilter.read("list-client-type", state.client_type);
+    else readList("list-client-type", state.client_type);
+  }
+  function renderClientTypeFilter(f, disabled) {
+    if (CtFilter) {
+      CtFilter.render("list-client-type", f || {}, state.client_type, disabled, clientTypeFilterOpts());
+    } else {
+      renderList("list-client-type", mergeItems(f.client_types, state.client_type), state.client_type, disabled);
+    }
+  }
+
+  function dateRangeFilterOpts() {
+    var f = dashCfg.filters || {};
+    return {
+      pickerId: "id_range_picker",
+      dfId: "id_df",
+      dtId: "id_dt",
+      quickContainerId: "date-range-quick",
+      bounds: {
+        min: boot.dataMinDate || boot.dateFrom || null,
+        max: boot.dataMaxDate || boot.dateTo || null,
+      },
+      labels: {
+        "7d": f.date_quick_7d || "7 дней",
+        "30d": f.date_quick_30d || "30 дней",
+        "90d": f.date_quick_90d || "90 дней",
+        mtd: f.date_quick_mtd || "Месяц",
+        prev_month: f.date_quick_prev_month || "Пр. месяц",
+        all: f.date_quick_all || "Весь период",
+        aria: f.date_quick_picks_aria || "Быстрый выбор периода",
+      },
+      onChange: function () {
+        scheduleFetch(400);
+      },
+    };
+  }
+  var chartArpu = null, chartRevenue = null, fpInstance = null, fetchTimer = null, loadGen = 0, epoch = 0, abortCtrl = null;
+  var suppressFetch = false;
+  var df = document.getElementById("id_df"), dt = document.getElementById("id_dt");
+  var statusEl = document.getElementById("financial-status"), errEl = document.getElementById("financial-error");
+
+  function setStatus(t) { if (statusEl) statusEl.textContent = t || ""; }
+  function setError(t) {
+    if (!errEl) return;
+    errEl.style.display = t ? "block" : "none";
+    errEl.textContent = t ? ((msgs.error_prefix || "Ошибка") + ": " + t) : "";
+  }
+  function scheduleFetch(d) {
+    if (suppressFetch) return;
+    epoch++;
+    clearTimeout(fetchTimer);
+    fetchTimer = setTimeout(function () { loadData(false); }, d == null ? 280 : d);
+  }
+  function readList(id, set) {
+    set.clear();
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.querySelectorAll('input[type="checkbox"]:checked').forEach(function (cb) {
+      var v = String(cb.value || "").trim();
+      if (v) set.add(v);
+    });
+  }
+  function buildQuery() {
+    var p = new URLSearchParams();
+    if (df && df.value) p.set("df", df.value);
+    if (dt && dt.value) p.set("dt", dt.value);
+    state.segment.forEach(function (v) { p.append("segment_id", v); });
+    state.service_kind.forEach(function (v) { p.append("service_kind", v); });
+    state.tariff.forEach(function (v) { p.append("tariff_id", v); });
+    state.client_type.forEach(function (v) { p.append("client_type", v); });
+    return p.toString();
+  }
+  function renderList(id, items, sel, disabled) {
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.innerHTML = "";
+    box.classList.toggle("disabled", !!disabled);
+    if (!items || !items.length) {
+      var p = document.createElement("p");
+      p.className = "muted";
+      p.style.fontSize = "0.75rem";
+      p.textContent = disabled ? (msgs.client_type_unavailable || "Недоступно") : (dashCfg.filters.filter_empty || "Нет значений");
+      box.appendChild(p);
+      return;
+    }
+    items.forEach(function (it) {
+      var val = String(it.value);
+      var lbl = document.createElement("label");
+      lbl.className = "filter-check-row";
+      var cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = val;
+      cb.checked = sel.has(val);
+      cb.disabled = !!disabled;
+      lbl.appendChild(cb);
+      var cap = document.createElement("span");
+      cap.className = "filter-check-label-text";
+      cap.textContent = it.label || val;
+      cap.title = cap.textContent;
+      lbl.appendChild(cap);
+      box.appendChild(lbl);
+    });
+  }
+  function mergeItems(apiItems, sel) {
+    var rows = [], seen = new Set();
+    (apiItems || []).forEach(function (it) {
+      var v = String(it.value || "").trim();
+      if (!v || seen.has(v)) return;
+      seen.add(v);
+      rows.push({ value: v, label: String(it.label || v).trim() || v });
+    });
+    if (sel && sel.forEach) sel.forEach(function (v) {
+      v = String(v || "").trim();
+      if (v && !seen.has(v)) { seen.add(v); rows.push({ value: v, label: v }); }
+    });
+    return rows;
+  }
+  function fmtVal(v) {
+    if (v == null || isNaN(v)) return "0";
+    var n = Number(v);
+    var r = Math.round(n * 1000) / 1000;
+    return r === Math.round(r) ? String(Math.round(r)) : r.toFixed(3);
+  }
+  function mapDatasets(spec) {
+    return (spec.datasets || []).map(function (d) {
+      return {
+        label: d.label,
+        data: (d.data || []).map(function (v) {
+          var n = Number(v);
+          return isNaN(n) ? 0 : n;
+        }),
+        borderColor: d.borderColor,
+        backgroundColor: d.backgroundColor,
+        borderWidth: 2,
+        fill: false,
+        tension: 0.15,
+        pointRadius: 3,
+      };
+    });
+  }
+  function makeLineChart(canvasId, spec, existing) {
+    var canvas = document.getElementById(canvasId);
+    if (!canvas || typeof Chart === "undefined") return existing;
+    if (existing) existing.destroy();
+    if (!spec || !spec.labels || !spec.labels.length) return null;
+    var datasets = mapDatasets(spec);
+    if (!datasets.length) return null;
+    return new Chart(canvas, {
+      type: "line",
+      data: { labels: spec.labels, datasets: datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function (ctx) {
+                return (ctx.dataset.label || "") + ": " + fmtVal(ctx.parsed.y);
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            title: { display: true, text: spec.xlabel || "", color: "#8b9cb3" },
+            ticks: { color: "#8b9cb3", maxRotation: 45 },
+            grid: { color: "rgba(45, 58, 77, 0.55)" },
+          },
+          y: {
+            title: { display: true, text: spec.ylabel || "", color: "#8b9cb3" },
+            ticks: { color: "#8b9cb3" },
+            beginAtZero: true,
+            grid: { color: "rgba(45, 58, 77, 0.55)" },
+          },
+        },
+      },
+    });
+  }
+  function hasValues(spec) {
+    return spec && spec.datasets && spec.datasets.some(function (ds) {
+      return (ds.data || []).some(function (v) { return v != null && !isNaN(Number(v)); });
+    });
+  }
+  function bindList(id, set, onChange) {
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.addEventListener("change", function () {
+      readList(id, set);
+      if (onChange) onChange(); else scheduleFetch();
+    });
+  }
+  function bindSelectAll(sel, id, set, onChange) {
+    var block = document.querySelector(sel);
+    if (!block) return;
+    block.querySelectorAll(".filter-actions button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var box = document.getElementById(id);
+        if (!box || box.classList.contains("disabled")) return;
+        var all = btn.getAttribute("data-action") === "all";
+        box.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = all; });
+        readList(id, set);
+        if (onChange) onChange(); else scheduleFetch();
+      });
+    });
+  }
+  function applyFilters(p) {
+    suppressFetch = true;
+    var f = p.filters || {}, sel = p.selected || {};
+    state.segment = new Set(sel.segment_ids || []);
+    state.service_kind = new Set(sel.service_kinds || []);
+    state.tariff = new Set(sel.tariff_ids || []);
+    state.client_type = new Set(sel.client_types || []);
+    renderClientTypeFilter(f, !p.has_client_type_column);
+    renderList("list-segment", mergeItems(f.segments, state.segment), state.segment, false);
+    renderList("list-service-kind", mergeItems(f.service_kinds, state.service_kind), state.service_kind, false);
+    renderList("list-tariff", mergeItems(f.tariffs, state.tariff), state.tariff, false);
+    suppressFetch = false;
+  }
+  function loadData(manual) {
+    var myEpoch = epoch, gen = ++loadGen;
+    if (abortCtrl) abortCtrl.abort();
+    abortCtrl = new AbortController();
+    readClientTypeFilter();
+    readList("list-segment", state.segment);
+    readList("list-service-kind", state.service_kind);
+    readList("list-tariff", state.tariff);
+    setError("");
+    setStatus(msgs.loading || "Загрузка…");
+    fetch(boot.apiUrl + "?" + buildQuery(), { signal: abortCtrl.signal, headers: { Accept: "application/json" } })
+      .then(function (r) { return r.json().then(function (j) { return { j: j }; }); })
+      .then(function (res) {
+        if (myEpoch !== epoch || gen !== loadGen) return;
+        var p = res.j || {};
+        if (p.config) dashCfg = p.config;
+        if (p.filters || p.selected) applyFilters(p);
+        if (!p.ok) throw new Error(p.error || "API error");
+        var arpu = p.charts && p.charts.arpu;
+        var rev = p.charts && (p.charts.normalized_revenue || p.charts.revenue);
+        chartArpu = makeLineChart("chart-arpu", arpu, chartArpu);
+        chartRevenue = makeLineChart("chart-revenue", rev, chartRevenue);
+        var t1 = document.getElementById("arpu-chart-title");
+        var t2 = document.getElementById("revenue-chart-title");
+        if (t1 && arpu) t1.textContent = arpu.title || t1.textContent;
+        if (t2 && rev) t2.textContent = rev.title || t2.textContent;
+        var empty = !hasValues(arpu) && !hasValues(rev);
+        setStatus(empty ? (msgs.no_data || "Нет данных") : (manual ? "Обновлено" : ""));
+      })
+      .catch(function (e) {
+        if (myEpoch !== epoch || gen !== loadGen || (e && e.name === "AbortError")) return;
+        setStatus("");
+        setError(String(e.message || e));
+      });
+  }
+  function resetFilters() {
+    suppressFetch = true;
+    state.segment.clear(); state.service_kind.clear(); state.tariff.clear(); state.client_type.clear();
+    var dmin = boot.dataMinDate || boot.dateFrom, dmax = boot.dataMaxDate || boot.dateTo;
+    if (df) df.value = dmin;
+    if (dt) dt.value = dmax;
+    if (fpInstance) fpInstance.setDate([dmin, dmax], true);
+    if (typeof VitrinaDateRangeFilter !== "undefined") {
+      VitrinaDateRangeFilter.clearActive("date-range-quick");
+    }
+    suppressFetch = false;
+    epoch++;
+    loadData(true);
+  }
+  function onClientTypeChange() {
+    readClientTypeFilter();
+    state.service_kind.clear();
+    state.tariff.clear();
+    scheduleFetch(80);
+  }
+  if (CtFilter) {
+    CtFilter.bind("list-client-type", state.client_type, onClientTypeChange);
+  } else {
+    bindList("list-client-type", state.client_type, onClientTypeChange);
+  }
+  bindList("list-segment", state.segment, function () { state.service_kind.clear(); state.tariff.clear(); scheduleFetch(80); });
+  bindList("list-service-kind", state.service_kind, function () { state.tariff.clear(); scheduleFetch(80); });
+  bindList("list-tariff", state.tariff);
+  (function () {
+    var block = document.querySelector('[data-filter="client_type"]');
+    if (!block) return;
+    block.querySelectorAll(".filter-actions button").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var on = btn.getAttribute("data-action") === "all";
+        if (CtFilter) {
+          CtFilter.setAll("list-client-type", state.client_type, on);
+        } else {
+          var box = document.getElementById("list-client-type");
+          if (!box || box.classList.contains("disabled")) return;
+          box.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = on; });
+          readList("list-client-type", state.client_type);
+        }
+        onClientTypeChange();
+      });
+    });
+  })();
+  bindSelectAll('[data-filter="segment"]', "list-segment", state.segment, function () { state.service_kind.clear(); state.tariff.clear(); scheduleFetch(80); });
+  bindSelectAll('[data-filter="service_kind"]', "list-service-kind", state.service_kind, function () { state.tariff.clear(); scheduleFetch(80); });
+  bindSelectAll('[data-filter="tariff"]', "list-tariff", state.tariff);
+  if (typeof VitrinaDateRangeFilter !== "undefined") {
+    fpInstance = VitrinaDateRangeFilter.init(dateRangeFilterOpts());
+  } else if (df && dt && typeof flatpickr !== "undefined") {
+    var picker = document.getElementById("id_range_picker");
+    if (picker) {
+      fpInstance = flatpickr(picker, {
+        mode: "range",
+        locale: (flatpickr.l10ns && flatpickr.l10ns.ru) ? flatpickr.l10ns.ru : "ru",
+        dateFormat: "Y-m-d",
+        defaultDate: [df.value, dt.value],
+        onChange: function (sel) {
+          if (sel.length === 1) { df.value = flatpickr.formatDate(sel[0], "Y-m-d"); dt.value = df.value; }
+          else if (sel.length >= 2) {
+            df.value = flatpickr.formatDate(sel[0], "Y-m-d");
+            dt.value = flatpickr.formatDate(sel[sel.length - 1], "Y-m-d");
+          }
+          scheduleFetch(400);
+        },
+      });
+    }
+  }
+  document.getElementById("btn-refresh").addEventListener("click", function () { loadData(true); });
+  document.getElementById("btn-reset").addEventListener("click", resetFilters);
+  var wi = document.querySelector(".workspace-inner");
+  if (wi) wi.classList.add("subscriber-layout");
+  loadData(false);
+})();
+</script>
+{% endblock %}

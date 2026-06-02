@@ -1,0 +1,477 @@
+name: telecom-mart
+
+services:
+  postgres:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    image: tm-postgres:dev
+    container_name: tm-postgres
+    restart: unless-stopped
+    # Airflow (api-server с большим UI-пулом + scheduler + dag-processor + triggerer + LocalExecutor).
+    # Запас нужен под пики Grid/API и параллельные задачи.
+    command: postgres -c max_connections=400
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - control_plane
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  minio:
+    build:
+      context: ./minio
+      dockerfile: Dockerfile
+    image: tm-minio:dev
+    container_name: tm-minio
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      # Данные S3 на диске хоста (каталог относительно файла compose или абсолютный путь).
+      - ${MINIO_DATA_PATH:-./minio_data}:/data
+    networks:
+      - data_plane
+      - control_plane
+    ports:
+      - "${MINIO_API_PORT}:9000"
+      - "${MINIO_CONSOLE_PORT}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # Одноразовая инициализация bucket для Iceberg warehouse.
+  minio-bucket-init:
+    image: minio/mc:latest
+    container_name: tm-minio-bucket-init
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./minio/init-iceberg-bucket.sh:/init-iceberg-bucket.sh:ro
+    networks:
+      - data_plane
+      - control_plane
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/init-iceberg-bucket.sh"]
+
+  # Одноразовая подготовка таблиц Iceberg JDBC catalog (Trino не создаёт их сам).
+  trino-catalog-init:
+    image: postgres:16-alpine
+    container_name: tm-trino-catalog-init
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./postgres/trino-iceberg-catalog-init.sql:/trino-iceberg-catalog-init.sql:ro
+      - ./postgres/trino-catalog-init.sh:/trino-catalog-init.sh:ro
+    networks:
+      - control_plane
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Креды только из env контейнера (см. postgres/trino-catalog-init.sh), без ${...} в compose.
+    command: ["sh", "/trino-catalog-init.sh"]
+
+  trino:
+    build:
+      context: ./trino
+      dockerfile: Dockerfile
+    image: tm-trino:dev
+    container_name: tm-trino
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-bucket-init:
+        condition: service_completed_successfully
+      trino-catalog-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      POSTGRES_INTERNAL_PORT: ${POSTGRES_INTERNAL_PORT:-5432}
+      ICEBERG_JDBC_CATALOG_NAME: ${ICEBERG_JDBC_CATALOG_NAME:-tm_iceberg}
+      S3_REGION: ${S3_REGION:-us-east-1}
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+    networks:
+      - data_plane
+      - control_plane
+    ports:
+      - "${TRINO_PORT}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/v1/info || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  clickhouse:
+    build:
+      context: ./clickhouse
+      dockerfile: Dockerfile
+    image: tm-clickhouse:dev
+    container_name: tm-clickhouse
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    networks:
+      - data_plane
+      - control_plane
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT}:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --query 'SELECT 1' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  airflow-init:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: tm-airflow:3.2-local
+    container_name: tm-airflow-init
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      trino:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/airflow-init.sh"]
+    user: "0:0"
+    environment:
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_SQL_ALCHEMY_CONN}
+      # Миграции выполняются в airflow-init; проверка alembic при старте api/scheduler и т.д. даёт ложные срабатывания в Docker.
+      AIRFLOW__DATABASE__CHECK_MIGRATIONS: "false"
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      # Airflow 3: JWT Execution API — [api_auth] jwt_secret (иначе подпись scheduler ≠ проверка api-server).
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    volumes:
+      - ./airflow/airflow-init.sh:/airflow-init.sh:ro
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+    extra_hosts:
+      - "host.docker.internal:${HOST_DOCKER_INTERNAL_IP:-host-gateway}"
+    networks:
+      - control_plane
+
+  airflow-api-server:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: tm-airflow:3.2-local
+    container_name: tm-airflow-api-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: api-server
+    user: "${AIRFLOW_UID}:0"
+    environment:
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_SQL_ALCHEMY_CONN}
+      # Миграции выполняются в airflow-init; проверка alembic при старте api/scheduler и т.д. даёт ложные срабатывания в Docker.
+      AIRFLOW__DATABASE__CHECK_MIGRATIONS: "false"
+      # UI поллит Grid/API; FAB/JWT трогают RevokedToken в БД на каждый запрос при высокой параллельности.
+      # При TimeoutError поднимайте POOL_* или PARALLELISM — см. .env.example (после изменений: recreate api-server).
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: ${AIRFLOW_API_SQL_ALCHEMY_POOL_SIZE:-40}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: ${AIRFLOW_API_SQL_ALCHEMY_MAX_OVERFLOW:-100}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_TIMEOUT: ${AIRFLOW_API_SQL_ALCHEMY_POOL_TIMEOUT:-180}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_RECYCLE: ${AIRFLOW_API_SQL_ALCHEMY_POOL_RECYCLE:-3600}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_PRE_PING: "True"
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      # Airflow 3: JWT Execution API — [api_auth] jwt_secret (иначе подпись scheduler ≠ проверка api-server).
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+    extra_hosts:
+      - "host.docker.internal:${HOST_DOCKER_INTERNAL_IP:-host-gateway}"
+    networks:
+      - control_plane
+    ports:
+      - "${AIRFLOW_PORT}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/v2/monitor/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  airflow-dag-processor:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: tm-airflow:3.2-local
+    container_name: tm-airflow-dag-processor
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: dag-processor
+    user: "${AIRFLOW_UID}:0"
+    environment:
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_SQL_ALCHEMY_CONN}
+      # Миграции выполняются в airflow-init; проверка alembic при старте api/scheduler и т.д. даёт ложные срабатывания в Docker.
+      AIRFLOW__DATABASE__CHECK_MIGRATIONS: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: ${AIRFLOW_DAG_PROC_SQL_ALCHEMY_POOL_SIZE:-8}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: ${AIRFLOW_DAG_PROC_SQL_ALCHEMY_MAX_OVERFLOW:-16}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_TIMEOUT: ${AIRFLOW_DAG_PROC_SQL_ALCHEMY_POOL_TIMEOUT:-90}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      # Airflow 3: JWT Execution API — [api_auth] jwt_secret (иначе подпись scheduler ≠ проверка api-server).
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+    extra_hosts:
+      - "host.docker.internal:${HOST_DOCKER_INTERNAL_IP:-host-gateway}"
+    networks:
+      - control_plane
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --local || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  airflow-scheduler:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: tm-airflow:3.2-local
+    container_name: tm-airflow-scheduler
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    command: scheduler
+    user: "${AIRFLOW_UID}:0"
+    environment:
+      # Airflow 3: воркеры LocalExecutor ходят в Execution API; иначе дефолт localhost:8080 → connection refused.
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_SQL_ALCHEMY_CONN}
+      # Миграции выполняются в airflow-init; проверка alembic при старте api/scheduler и т.д. даёт ложные срабатывания в Docker.
+      AIRFLOW__DATABASE__CHECK_MIGRATIONS: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: ${AIRFLOW_SCHEDULER_SQL_ALCHEMY_POOL_SIZE:-12}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: ${AIRFLOW_SCHEDULER_SQL_ALCHEMY_MAX_OVERFLOW:-24}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_TIMEOUT: ${AIRFLOW_SCHEDULER_SQL_ALCHEMY_POOL_TIMEOUT:-90}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      # Airflow 3: JWT Execution API — [api_auth] jwt_secret (иначе подпись scheduler ≠ проверка api-server).
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+    extra_hosts:
+      - "host.docker.internal:${HOST_DOCKER_INTERNAL_IP:-host-gateway}"
+    networks:
+      - control_plane
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --local || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  airflow-triggerer:
+    build:
+      context: ./airflow
+      dockerfile: Dockerfile
+    image: tm-airflow:3.2-local
+    container_name: tm-airflow-triggerer
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-api-server:
+        condition: service_healthy
+    command: triggerer
+    user: "${AIRFLOW_UID}:0"
+    environment:
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_SQL_ALCHEMY_CONN}
+      # Миграции выполняются в airflow-init; проверка alembic при старте api/scheduler и т.д. даёт ложные срабатывания в Docker.
+      AIRFLOW__DATABASE__CHECK_MIGRATIONS: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_SIZE: ${AIRFLOW_TRIGGERER_SQL_ALCHEMY_POOL_SIZE:-8}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_MAX_OVERFLOW: ${AIRFLOW_TRIGGERER_SQL_ALCHEMY_MAX_OVERFLOW:-16}
+      AIRFLOW__DATABASE__SQL_ALCHEMY_POOL_TIMEOUT: ${AIRFLOW_TRIGGERER_SQL_ALCHEMY_POOL_TIMEOUT:-90}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      # Airflow 3: JWT Execution API — [api_auth] jwt_secret (иначе подпись scheduler ≠ проверка api-server).
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_API_SECRET_KEY:-000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW_UID: ${AIRFLOW_UID}
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      - ./airflow/scripts:/opt/airflow/scripts
+    extra_hosts:
+      - "host.docker.internal:${HOST_DOCKER_INTERNAL_IP:-host-gateway}"
+    networks:
+      - control_plane
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type TriggererJob --local || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # Дашборд KPI: NL2SQL через llm-api (прокси DeepSeek), проверка в sqlguard-api, данные в ClickHouse.
+  dashbot:
+    build:
+      context: ./dashbot
+      dockerfile: Dockerfile
+    image: tm-dashbot:django
+    container_name: tm-dashbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      llm-api:
+        condition: service_healthy
+      sqlguard-api:
+        condition: service_healthy
+    networks:
+      - control_plane
+    volumes:
+      - dashbot_sqlite:/app/.dashbot
+    ports:
+      - "${DASHBOT_STUB_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health/ | grep -q ok || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  sqlguard-api:
+    build:
+      context: ./sqlguard-api
+      dockerfile: Dockerfile
+    image: tm-sqlguard-api:stub
+    container_name: tm-sqlguard-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - control_plane
+    ports:
+      - "${SQLGUARD_STUB_PORT:-8091}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  llm-api:
+    build:
+      context: ./llm-api
+      dockerfile: Dockerfile
+    image: tm-llm-api:stub
+    container_name: tm-llm-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - control_plane
+    ports:
+      - "${LLM_STUB_PORT:-8092}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()\" || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+networks:
+  data_plane:
+    name: tm-data-plane
+  control_plane:
+    name: tm-control-plane
+
+volumes:
+  postgres_data:
+    name: tm-postgres-data
+  clickhouse_data:
+    name: tm-clickhouse-data
+  clickhouse_logs:
+    name: tm-clickhouse-logs
+  dashbot_sqlite:
+    name: tm-dashbot-sqlite

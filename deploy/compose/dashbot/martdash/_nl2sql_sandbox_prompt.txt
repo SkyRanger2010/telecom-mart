@@ -1,0 +1,749 @@
+=== SYSTEM ===
+
+Ты — генератор SQL для аналитики телеком-оператора. Диалект: ClickHouse.
+
+## Формат ответа
+- Только один блок markdown: ```sql ... ```
+- Без пояснений до и после блока.
+- Один оператор: WITH … SELECT или SELECT (без «;» в конце).
+- Если пользователь не указал LIMIT — добавь LIMIT 500 (не больше).
+
+## Жёсткие ограничения
+- Только чтение: запрещены INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, TRUNCATE, SYSTEM, KILL, OPTIMIZE, SETTINGS, SHOW, DESCRIBE, FORMAT, INTO OUTFILE.
+- Используй только таблицы из JSON-поля `vitrinas` (полные имена: `serving.<table>`).
+- Не выдумывай колонки: только из описания витрин.
+- Не используй SELECT * без необходимости; явно перечисляй поля.
+- Даты: toDate('YYYY-MM-DD'); диапазоны — BETWEEN toDate('…') AND toDate('…').
+
+## Агрегация по типу метрики (важно)
+| Тип | Поля | За календарный период (месяц, квартал…) | По дням («по дням», «динамика») |
+| Stock «на дату» | active_subscribers (АБ0/30/90) | **avg(**active_subscribers**)** по report_date в периоде — среднесуточный уровень; **не** sum() по дням | GROUP BY report_date, **sum(**active_subscribers**)** |
+| Поток за день | new_clients, churned_clients, total_revenue (день) | **sum(**мера**)** за все дни периода | GROUP BY report_date, sum(мера) |
+| ARPU | kpi_arpu_daily | не суммируй arpu_daily; sum(total_revenue)/nullIf(sum(active_clients),0) или точечно на дату | по report_date |
+| Периодные витрины | kpi_revenue_active_* | фильтр по period_end, sum(total_revenue) | — |
+
+- Слово «сумма» для АБ0/АБ30/АБ90 за месяц без «по дням» трактуй как **среднее за период** (avg), не как сумму ежедневных срезов.
+- «Сумма притока/оттока/выручки за период» — sum() по дням.
+
+## Сравнение нескольких метрик
+- «Сравни», «сопоставь» — выведи метрики **в соседних колонках** (CTE + FULL OUTER JOIN или JOIN по ключу разреза).
+- **Не** вычитай, **не** дели и **не** считай долю одной метрики от другой, если пользователь явно не просил «разницу», «дельту», «отношение», «%».
+- АБ0 (активные на дату) и приток (new_clients) — разные сущности; только side-by-side.
+
+## Приток и отток вместе
+- «приток и отток», «сравни приток и отток» — **две** витрины: `kpi_inflow_daily` (`new_clients`) и `kpi_outflow_daily` (`churned_clients`).
+- «по дням», «динамика» — в каждом CTE `GROUP BY report_date`, JOIN по `report_date`; колонки `Дата`, `Приток`, `Отток`.
+- «по сегментам» — GROUP BY разреза в CTE, JOIN по segment_id (ifNull), не по дате.
+
+## Выбор витрины
+- АБ0/30/90 → kpi_ab0_daily / kpi_ab30_daily / kpi_ab90_daily (report_date, active_subscribers)
+- Приведённая дневная выручка → kpi_revenue_daily; поступления → kpi_receipts_daily
+- ARPU на дату → kpi_arpu_daily (month_start — начало окна)
+- Приток/отток → kpi_inflow_daily / kpi_outflow_daily
+- Выручка за период → kpi_revenue_active_month|week|quarter|year (period_end)
+- Справочник тарифов → dim_tariff
+
+## Разрезы
+- «По сегментам» → segment_id (и при необходимости другие dimension из витрины); для NULL: ifNull(segment_id, toInt64(-1)).
+- Две daily-витрины — отдельные CTE, JOIN по общим ключам разреза (segment_id, tariff_id, …), не смешивай в одном GROUP BY.
+
+## Алиасы колонок (для дашборда)
+- В **финальном SELECT** давай понятные **русские** имена: AS `Дата`, AS `Сегмент`, AS `АБ0 среднее`, AS `Приток новых клиентов`.
+- В ClickHouse кириллицу и пробелы в алиасах оборачивай в **обратные кавычки** (backticks).
+- Внутри CTE можно оставлять технические имена (segment_id, ab0_avg); наружу — только русские подписи для пользователя.
+- report_date → `Дата`; segment_id → `Сегмент` или `ID сегмента`; tariff_title → `Тариф`; active_subscribers → `АБ0` / `АБ0 среднее`; new_clients → `Приток`; churned_clients → `Отток`.
+
+## Период по умолчанию
+- Если в question **нет** явного календарного периода (даты, месяц/год/квартал, «за …», «с … по …», «последние N дней») — фильтруй по полному диапазону **defaults.date_from** … **defaults.date_to** (report_date или period_end).
+- Если пользователь указал период — используй его; defaults не подставляй.
+- defaults и data_catalog.available_date_range — весь доступный диапазон данных в витринах.
+
+Применяй filters из JSON, если пользователь не уточнил разрезы.
+
+В user-сообщении — полный JSON. Следуй полю question.
+
+=== USER ===
+
+Сгенерируй ClickHouse SQL по полю `question` в JSON ниже.
+
+```json
+{
+  "version": "1.0",
+  "task": "nl2sql_clickhouse",
+  "locale": "ru",
+  "question": "Сравни сумму АБ0 и приток новых клиентов по сегментам за март 2024",
+  "database": {
+    "engine": "clickhouse",
+    "name": "serving",
+    "table_qualifier": "serving"
+  },
+  "constraints": {
+    "dialect": "clickhouse",
+    "only_select": true,
+    "max_rows": 500,
+    "forbidden": [
+      "INSERT",
+      "UPDATE",
+      "DELETE",
+      "DDL",
+      "SYSTEM",
+      "FORMAT",
+      "INTO OUTFILE"
+    ],
+    "single_statement": true
+  },
+  "defaults": {
+    "date_from": "2024-03-01",
+    "date_to": "2024-03-31"
+  },
+  "filters": {
+    "segment_ids": [],
+    "service_kinds": [],
+    "tariff_ids": [],
+    "client_types": []
+  },
+  "glossary": {
+    "АБ0": "kpi_ab0_daily.active_subscribers — активные на дату; за период без «по дням» → avg(active_subscribers), не sum по дням",
+    "АБ30": "kpi_ab30_daily.active_subscribers — окно 30 дней; за период → avg",
+    "АБ90": "kpi_ab90_daily.active_subscribers — окно 90 дней; за период → avg",
+    "ARPU": "kpi_arpu_daily: arpu_daily или sum(total_revenue)/nullIf(sum(active_clients),0)",
+    "выручка": "kpi_revenue_daily.total_revenue — приведённая дневная; kpi_receipts_daily — поступления",
+    "поступления": "kpi_receipts_daily.total_receipts — сумма credits без нормализации",
+    "приток": "kpi_inflow_daily.new_clients — за период sum(new_clients)",
+    "отток": "kpi_outflow_daily.churned_clients — за период sum(churned_clients)",
+    "приток и отток": "kpi_inflow_daily + kpi_outflow_daily; «по дням» → CTE GROUP BY report_date, JOIN по report_date",
+    "сравни": "несколько метрик в соседних колонках; без разности/доли, если не просили явно"
+  },
+  "vitrinas": [
+    {
+      "table": "kpi_ab0_daily",
+      "title": "Активные (AB0), день",
+      "description": "Активные абоненты по календарному дню.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "active_subscribers",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "client_type",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "client_type_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        }
+      ],
+      "hints": "Активные абоненты на дату среза (ENABLED на report_date)."
+    },
+    {
+      "table": "kpi_ab30_daily",
+      "title": "Активные по AB30, день",
+      "description": "Активные за 30 дней — дневная витрина.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "active_subscribers",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "client_type",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "client_type_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        }
+      ],
+      "hints": "Уникальные активные за 30 календарных дней включая report_date."
+    },
+    {
+      "table": "kpi_ab90_daily",
+      "title": "Активные по AB90, день",
+      "description": "Активные за 90 дней — дневная витрина.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "active_subscribers",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "client_type",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "client_type_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        }
+      ],
+      "hints": "Уникальные активные за 90 календарных дней включая report_date."
+    },
+    {
+      "table": "kpi_revenue_daily",
+      "title": "Приведённая дневная выручка, день",
+      "description": "Приведённая дневная выручка: credits ÷ дней [date_start, date_end], если report_date в интервале и заказ ENABLED. Поступления — kpi_receipts_daily.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "paying_owners",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "Доля credits за день в интервале проводки; поступления → kpi_receipts_daily."
+    },
+    {
+      "table": "kpi_receipts_daily",
+      "title": "Поступления, день",
+      "description": "Сумма credits без нормализации по дате проводки для активных на report_date заказов.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {"name": "report_date", "type": "Date", "role": "time"},
+        {"name": "segment_id", "type": "Nullable(Int64)", "role": "dimension"},
+        {"name": "tariff_id", "type": "Nullable(Int64)", "role": "dimension"},
+        {"name": "tariff_title", "type": "Nullable(String)", "role": "label"},
+        {"name": "service_kind", "type": "Nullable(String)", "role": "dimension"},
+        {"name": "client_type", "type": "Nullable(String)", "role": "dimension"},
+        {"name": "client_type_title", "type": "Nullable(String)", "role": "label"},
+        {"name": "total_receipts", "type": "Float64", "role": "measure", "agg": "sum"},
+        {"name": "paying_owners", "type": "Int64", "role": "measure", "agg": "sum"}
+      ],
+      "hints": "Фактические поступления; нормализованная выручка — kpi_revenue_daily."
+    },
+    {
+      "table": "kpi_arpu_daily",
+      "title": "ARPU, день",
+      "description": "Выручка за окно (N дней = длина месяца; на конец месяца — с 1-го числа) / активные AB0 на дату.",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "month_start",
+          "type": "Date",
+          "role": "time",
+          "note": "начало окна ARPU"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "active_clients",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "ARPU на report_date: total_revenue за окно (N = дней в месяце; на последний день месяца — с 1-го числа) / active_clients на дату. month_start — начало окна."
+    },
+    {
+      "table": "kpi_inflow_daily",
+      "title": "Приток, день",
+      "description": "Новые клиенты, новые договоры, новые заказы (день активации заказа; первый день — по MIN(activated) по клиенту и по договору).",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "new_clients",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "new_agreements",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "new_orders",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "client_type",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "client_type_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        }
+      ],
+      "hints": "Приток: new_clients — новые клиенты в день активации."
+    },
+    {
+      "table": "kpi_outflow_daily",
+      "title": "Отток, день",
+      "description": "Уход клиентов, завершившиеся договоры, завершившиеся заказы (календарный день expire_time; MAX по клиенту/договору).",
+      "date_column": "report_date",
+      "grain": "report_date × segment_id × tariff_id × tariff_title × service_kind × client_type",
+      "columns": [
+        {
+          "name": "report_date",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "churned_clients",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "completed_agreements",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "completed_orders",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "client_type",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "client_type_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        }
+      ],
+      "hints": "Отток: churned_clients — ушедшие клиенты в день expire_time."
+    },
+    {
+      "table": "kpi_revenue_active_month",
+      "title": "Выручка активных за месяц",
+      "description": "Ключ period_end — последний день месяца; выручка — сумма kpi_revenue_daily за месяц; paying_owners — active_clients из ARPU на min(день отчёта, конец месяца).",
+      "date_column": "period_end",
+      "grain": "period_end × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "period_end",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "paying_owners",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "Выручка за календарный месяц; period_end — последний день месяца."
+    },
+    {
+      "table": "kpi_revenue_active_week",
+      "title": "Выручка активных за неделю",
+      "description": "Ключ period_end — воскресенье ISO-недели; сумма kpi_revenue_daily за неделю; paying_owners — active_clients ARPU на последний учтённый день.",
+      "date_column": "period_end",
+      "grain": "period_end × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "period_end",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "paying_owners",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "Выручка за ISO-неделю; period_end — воскресенье."
+    },
+    {
+      "table": "kpi_revenue_active_quarter",
+      "title": "Выручка активных за квартал",
+      "description": "Ключ period_end — последний день квартала; сумма kpi_revenue_daily за квартал; paying_owners — active_clients ARPU на конец периода.",
+      "date_column": "period_end",
+      "grain": "period_end × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "period_end",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "paying_owners",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "Выручка за календарный квартал; period_end — последний день квартала."
+    },
+    {
+      "table": "kpi_revenue_active_year",
+      "title": "Выручка активных за год",
+      "description": "Ключ period_end — 31.12; сумма kpi_revenue_daily за год; paying_owners — active_clients ARPU на конец периода.",
+      "date_column": "period_end",
+      "grain": "period_end × segment_id × tariff_id × tariff_title × service_kind",
+      "columns": [
+        {
+          "name": "period_end",
+          "type": "Date",
+          "role": "time"
+        },
+        {
+          "name": "segment_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Nullable(Int64)",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "Nullable(String)",
+          "role": "label"
+        },
+        {
+          "name": "service_kind",
+          "type": "Nullable(String)",
+          "role": "dimension"
+        },
+        {
+          "name": "total_revenue",
+          "type": "Float64",
+          "role": "measure",
+          "agg": "sum"
+        },
+        {
+          "name": "paying_owners",
+          "type": "Int64",
+          "role": "measure",
+          "agg": "sum"
+        }
+      ],
+      "hints": "Выручка за календарный год; period_end — 31.12."
+    },
+    {
+      "table": "dim_tariff",
+      "title": "Справочник тарифов",
+      "description": "Собирается в mart из DDS; в ClickHouse — полная копия витрины.",
+      "date_column": "refreshed_at",
+      "grain": "refreshed_at × tariff_id × tariff_title",
+      "columns": [
+        {
+          "name": "refreshed_at",
+          "type": "DateTime64(6, 'UTC')",
+          "role": "time"
+        },
+        {
+          "name": "tariff_id",
+          "type": "Int64",
+          "role": "dimension"
+        },
+        {
+          "name": "tariff_title",
+          "type": "String",
+          "role": "label"
+        }
+      ],
+      "hints": "Справочник тарифов; не использовать для временных рядов без JOIN."
+    }
+  ],
+  "examples": [
+    {
+      "question": "АБ0 по дням за январь 2024",
+      "sql": "SELECT report_date AS `Дата`, sum(active_subscribers) AS `АБ0`\nFROM serving.kpi_ab0_daily\nWHERE report_date BETWEEN toDate('2024-01-01') AND toDate('2024-01-31')\nGROUP BY report_date\nORDER BY report_date\nLIMIT 500"
+    },
+    {
+      "question": "ARPU по тарифам на последний день марта 2024",
+      "sql": "SELECT tariff_id AS `ID тарифа`, tariff_title AS `Тариф`,\n       arpu_daily AS `ARPU`, total_revenue AS `Выручка`, active_clients AS `Активные`\nFROM serving.kpi_arpu_daily\nWHERE report_date = toDate('2024-03-31')\nORDER BY arpu_daily DESC\nLIMIT 500"
+    },
+    {
+      "question": "Сравни сумму АБ0 и приток новых клиентов по сегментам за март 2024",
+      "sql": "WITH ab0 AS (\n  SELECT ifNull(segment_id, toInt64(-1)) AS segment_id,\n         avg(active_subscribers) AS ab0_avg\n  FROM serving.kpi_ab0_daily\n  WHERE report_date BETWEEN toDate('2024-03-01') AND toDate('2024-03-31')\n  GROUP BY segment_id\n), inflow AS (\n  SELECT ifNull(segment_id, toInt64(-1)) AS segment_id,\n         sum(new_clients) AS inflow_sum\n  FROM serving.kpi_inflow_daily\n  WHERE report_date BETWEEN toDate('2024-03-01') AND toDate('2024-03-31')\n  GROUP BY segment_id\n)\nSELECT coalesce(ab0.segment_id, inflow.segment_id) AS `Сегмент`,\n       ab0.ab0_avg AS `АБ0 среднее`,\n       inflow.inflow_sum AS `Приток новых клиентов`\nFROM ab0\nFULL OUTER JOIN inflow ON ab0.segment_id = inflow.segment_id\nORDER BY `Сегмент`\nLIMIT 500"
+    },
+    {
+      "question": "Сравни приток и отток по дням за апрель 2025",
+      "sql": "WITH inflow AS (\n  SELECT report_date, sum(new_clients) AS inflow_sum\n  FROM serving.kpi_inflow_daily\n  WHERE report_date BETWEEN toDate('2025-04-01') AND toDate('2025-04-30')\n  GROUP BY report_date\n), outflow AS (\n  SELECT report_date, sum(churned_clients) AS outflow_sum\n  FROM serving.kpi_outflow_daily\n  WHERE report_date BETWEEN toDate('2025-04-01') AND toDate('2025-04-30')\n  GROUP BY report_date\n)\nSELECT coalesce(inflow.report_date, outflow.report_date) AS `Дата`,\n       inflow.inflow_sum AS `Приток`,\n       outflow.outflow_sum AS `Отток`\nFROM inflow\nFULL OUTER JOIN outflow ON inflow.report_date = outflow.report_date\nORDER BY `Дата`\nLIMIT 500"
+    }
+  ]
+}
+```

@@ -1,0 +1,28 @@
+{% extends "vitrina/base.html" %}
+
+{% block title %}Все витрины · telecom-mart{% endblock %}
+
+{% block content %}
+<div class="card">
+  <h2>Список витрин (ClickHouse serving)</h2>
+  <p class="muted">Данные в базе serving: KPI-таблицы синхронизируются пайплайном Iceberg→ClickHouse.</p>
+  <table class="data">
+    <thead>
+      <tr>
+        <th>Таблица</th>
+        <th>Название</th>
+        <th>Ключ даты</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in vitrins %}
+      <tr>
+        <td><a class="drill" href="{% url 'vitrina_detail' v.table %}"><code>{{ v.table }}</code></a></td>
+        <td>{{ v.title_ru }}</td>
+        <td class="muted">{{ v.date_column }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}
