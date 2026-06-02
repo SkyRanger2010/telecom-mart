@@ -407,10 +407,15 @@ def _sub_ord_stack_cte(
 
 
 def _subscription_active_on_date(snapshot_date_sql: str) -> str:
-    """Активный продуктовый заказ на дату среза (совпадает с логикой АБ0)."""
+    """Активный продуктовый заказ на дату среза (совпадает с логикой АБ0).
+
+    Требует: статус ENABLED, заказ активирован не позже даты среза,
+    срок не истёк (expire_time IS NULL или >= даты среза).
+    """
     return f"""(
         o.status = 'ENABLED'
           AND o.activated IS NOT NULL
+          AND CAST(o.activated AS DATE) <= CAST({snapshot_date_sql} AS DATE)
           AND (o.expire_time IS NULL OR CAST(o.expire_time AS DATE) >= CAST({snapshot_date_sql} AS DATE))
     )"""
 
