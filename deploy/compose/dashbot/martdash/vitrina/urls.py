@@ -1,3 +1,4 @@
+"""Маршруты дашборда: главная, API (абоненты/финансы/NL2SQL), drilldown по витринам."""
 from django.urls import path
 
 from vitrina import views

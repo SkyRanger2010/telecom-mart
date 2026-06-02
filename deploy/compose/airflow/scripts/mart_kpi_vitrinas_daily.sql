@@ -1,7 +1,8 @@
 -- -----------------------------------------------------------------------------
--- MART — KPI-витрины (монолитный SQL для эталона). Рекомендуемый режим эксплуатации:
--- по одному скрипту на витрину — `mart_vitrina_runner.py` и `mart_jobs/gen_kpi_*_daily.py`,
--- параметр `--report-date` (совпадает с ds DAG).
+-- Монолитный SQL-эталон всех KPI-витрин за один день (2024-06-02).
+-- Рекомендуемый режим эксплуатации: по одному скрипту на витрину —
+t-- ``mart_vitrina_runner.py`` и ``mart_jobs/gen_kpi_*_daily.py``,
+-- параметр ``--report-date`` (совпадает с ds DAG).
 --
 -- Порядок DAG: RAW -> validate_raw_daily.sql -> DDS -> этот файл.
 -- Спецификация KPI: VKR_SCOPE_MVP.md §5.5.
@@ -92,8 +93,10 @@ WITH (partitioning = ARRAY['day(report_date)']);
 -- <<< CONFIG: синхронно подставить дату ниже во все операторы блока >>> 
 -- =====================================================================
 
-DELETE FROM iceberg.mart.kpi_ab0_daily
-WHERE report_date = DATE '2024-06-02';
+-- AB0: активные заказчики на дату среза.
+-- Условие: status='ENABLED', activated IS NOT NULL, expire_time >= process_date.
+-- Подзапрос sub_ord фильтрует expenditure=false, is_draft=false.
+DELETE FROM iceberg.mart.kpi_ab0_daily WHERE report_date = DATE '2024-06-02';
 
 INSERT INTO iceberg.mart.kpi_ab0_daily (
     report_date,
@@ -129,6 +132,9 @@ WHERE o.status = 'ENABLED'
   AND (o.expire_time IS NULL OR CAST(o.expire_time AS DATE) >= c.process_date)
 GROUP BY c.process_date, o.segment_id, o.base_type, o.tariff_id;
 
+-- AB30/AB90: окно 30/90 календарных дней — activated в прошлом,
+-- expire_time >= process_date - (29 | 89) дней.
+-- Статус: ENABLED или EXPIRED (DISABLED исключены).
 DELETE FROM iceberg.mart.kpi_ab30_daily WHERE report_date = DATE '2024-06-02';
 
 INSERT INTO iceberg.mart.kpi_ab30_daily (
@@ -203,6 +209,10 @@ WHERE o.activated IS NOT NULL
   AND o.status IN ('ENABLED', 'EXPIRED')
 GROUP BY c.process_date, o.segment_id, o.base_type, o.tariff_id;
 
+-- ARPU: MTD-выручка к отчётной дате, делённая на активных клиентов.
+-- rev CTE: нормализация credits по типу периода (MONTHLY / YEARLY / DAILY / ONETIME).
+-- actives: AB0 на дату среза.
+-- mtd_rev: накопленная нормализованная выручка с начала месяца окна.
 DELETE FROM iceberg.mart.kpi_arpu_daily WHERE report_date = DATE '2024-06-02';
 
 INSERT INTO iceberg.mart.kpi_arpu_daily (
@@ -318,6 +328,12 @@ LEFT JOIN mtd_rev m
 /*
 DELETE / INSERT для kpi_revenue_daily раньше строились из kpi_arpu_daily (прирост MTD); актуальный SQL генерируется в Python — см. mart_runner_common.py.
 */
+-- Приток: заказы с activated = report_date.
+-- first_client_activation: MIN(activated) по subscriber_id.
+-- first_agreement_activation: MIN(activated) по agreement_id (owner_id).
+-- new_clients: те, у кого first_activation_day = report_date.
+-- new_agreements: те, у кого first_activation_day = report_date.
+-- new_orders: все заказы с activated = report_date.
 DELETE FROM iceberg.mart.kpi_inflow_daily WHERE report_date = DATE '2024-06-02';
 
 INSERT INTO iceberg.mart.kpi_inflow_daily (
@@ -376,6 +392,12 @@ INNER JOIN first_client_activation fca ON fca.subscriber_id = o.subscriber_id
 INNER JOIN first_agreement_activation faa ON faa.agreement_id = o.owner_id
 GROUP BY c.process_date, o.segment_id, o.base_type, o.tariff_id;
 
+-- Отток: заказы с expire_time = report_date.
+-- agreement_last_end: MAX(expire_time) по agreement_id.
+-- client_last_end: MAX(expire_time) по subscriber_id.
+-- churned_clients: те, у кого last_service_end_day = report_date (все подписки завершены).
+-- completed_agreements: те, у кого last_service_end_day = report_date.
+-- completed_orders: все заказы с expire_time = report_date.
 DELETE FROM iceberg.mart.kpi_outflow_daily WHERE report_date = DATE '2024-06-02';
 
 INSERT INTO iceberg.mart.kpi_outflow_daily (

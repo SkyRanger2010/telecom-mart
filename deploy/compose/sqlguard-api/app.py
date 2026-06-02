@@ -25,11 +25,13 @@ app = FastAPI(
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """Health-check эндпоинт."""
     return {"status": "ok", "service": SERVICE}
 
 
 @app.get("/api/v1/info")
 def info() -> dict[str, Any]:
+    """Метаданные сервиса: имя и текущее время."""
     return {"service": SERVICE, "time": datetime.now(tz=UTC).isoformat()}
 
 
@@ -40,6 +42,11 @@ class SqlValidateIn(BaseModel):
 
 @app.post("/api/sql/validate")
 def sql_validate(body: SqlValidateIn) -> dict[str, Any]:
+    """Проверить SQL: только для dialect=clickhouse — правила NL2SQL.
+
+    Returns:
+        valid (bool), issues (список ошибок), normalized_sql.
+    """
     if (body.dialect or "").strip().lower() != "clickhouse":
         return {
             "valid": True,
@@ -54,6 +61,7 @@ def sql_validate(body: SqlValidateIn) -> dict[str, Any]:
 
 @app.post("/api/sql/guard")
 def sql_guard(body: SqlValidateIn) -> dict[str, Any]:
+    """Проверить SQL (формат guard): allowed + причина отказа."""
     if (body.dialect or "").strip().lower() != "clickhouse":
         return {"allowed": True, "reason": None, "clickhouse_nl2sql_rules": False}
     ok, msg = validate_readonly_clickhouse_sql(body.sql)
@@ -67,6 +75,10 @@ def sql_guard(body: SqlValidateIn) -> dict[str, Any]:
 
 @app.post("/api/v1/nl2sql/guard-assistant")
 def nl2sql_guard_assistant(body: GuardAssistantIn) -> dict[str, Any]:
+    """Проверить ответ LLM: извлечь SQL, валидировать, опционально сформировать DDL.
+
+    Основной эндпоинт для пайплайна NL2SQL после генерации SQL моделью.
+    """
     out = guard_assistant_response(body)
     return out.model_dump() | {"clickhouse_nl2sql_rules": True}
 
@@ -78,6 +90,10 @@ class SqlOnlyGuardIn(BaseModel):
 
 @app.post("/api/v1/nl2sql/guard-sql")
 def nl2sql_guard_sql(body: SqlOnlyGuardIn) -> dict[str, Any]:
+    """Проверить готовый SQL (без извлечения из ответа модели).
+
+    Применяет правила readonly + enforce LIMIT.
+    """
     ok, msg = validate_readonly_clickhouse_sql(body.sql)
     if not ok:
         return {
