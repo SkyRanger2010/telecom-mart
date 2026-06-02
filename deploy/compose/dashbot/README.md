@@ -151,9 +151,4 @@ docker compose exec dashbot ls /app/staticfiles/vitrina/
 docker compose exec dashbot python -c "from vitrina.client_type_filter import build_client_type_filter_options; print('ok')"
 ```
 
-## Связанная документация
 
-- Контур compose: [`../README.md`](../README.md)
-- KPI в MART и методика: [`../../../VKR_SCOPE_MVP.md`](../../../VKR_SCOPE_MVP.md) (раздел 5.5)
-- SQL-эталон витрин: `airflow/scripts/mart_kpi_vitrinas_daily.sql`
-- Репликация MART → ClickHouse: `airflow/scripts/mart_serving_clickhouse.py`
