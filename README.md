@@ -67,7 +67,7 @@ docker compose up -d
 ## Документация
 
 - [`VKR_SCOPE_MVP.md`](VKR_SCOPE_MVP.md) — тема диплома, границы MVP, методика KPI, определения таблиц
-- [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) — логическая и физическая архитектура, dev/stage/prod
+- [`TARGET_ARCHITECTURE.md`](TARGET_ARCHITECTURE.md) — логическая и физическая архитектура
 - [`deploy/compose/dashbot/README.md`](deploy/compose/dashbot/README.md) — устройство дашбордов, API, фильтры
 
 ## Контекст
